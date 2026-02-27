@@ -91,6 +91,16 @@ enum class TerminalMode {
         }
     },
 
+    // DEC Private Mode 1004 - Focus Tracking
+    // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Mouse-Tracking
+    // When enabled, terminal sends CSI I on focus gain and CSI O on focus loss.
+    // Used by TUI apps (vim, tmux, etc.) to react to focus changes.
+    FocusTracking {
+        override fun setEnabled(terminal: Terminal?, enabled: Boolean) {
+            terminal?.setFocusTracking(enabled)
+        }
+    },
+
     // DEC Private Mode 2026 - Synchronized Output / Update Mode
     // Spec: https://github.com/contour-terminal/vt-extensions/blob/master/synchronized-output.md
     // Also: https://gist.github.com/christianparpart/d8a62cc1ab659194337d73e399004036

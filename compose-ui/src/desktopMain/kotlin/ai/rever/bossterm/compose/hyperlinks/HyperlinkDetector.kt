@@ -168,7 +168,9 @@ class HyperlinkRegistry {
         ))
 
         // ================ File Path Patterns ================
-        // These patterns validate that paths exist before creating hyperlinks
+        // These patterns validate that paths exist before creating hyperlinks.
+        // Uses resolveAndValidateCached() to avoid blocking the render thread:
+        // on a cache miss, returns null (skip) and schedules async check.
 
         // Home-relative paths: ~/path/to/file (priority -5)
         // Must come before absolute Unix paths to avoid ~/... matching as Unix path
@@ -178,7 +180,7 @@ class HyperlinkRegistry {
             priority = -5,
             quickCheck = { FilePathResolver.looksLikeHomePath(it) },
             pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+                FilePathResolver.resolveAndValidateCached(match, cwd)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }
@@ -191,7 +193,7 @@ class HyperlinkRegistry {
             priority = -6,
             quickCheck = { FilePathResolver.looksLikeRelativePath(it) },
             pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+                FilePathResolver.resolveAndValidateCached(match, cwd)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }
@@ -205,7 +207,7 @@ class HyperlinkRegistry {
             priority = -7,
             quickCheck = { FilePathResolver.looksLikeUnixPath(it) },
             pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+                FilePathResolver.resolveAndValidateCached(match, cwd)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }
@@ -218,7 +220,7 @@ class HyperlinkRegistry {
             priority = -7,
             quickCheck = { FilePathResolver.looksLikeWindowsPath(it) },
             pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+                FilePathResolver.resolveAndValidateCached(match, cwd)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }

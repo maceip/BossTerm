@@ -39,6 +39,16 @@ interface TerminalDisplay {
     fun setBracketedPasteMode(bracketedPasteModeEnabled: Boolean) {}
 
     /**
+     * Set focus tracking mode (DECSET 1004).
+     * When enabled, the terminal should send CSI I on focus gain and CSI O on focus loss.
+     *
+     * Default implementation is a no-op for backwards compatibility.
+     *
+     * @param enabled true to enable focus tracking, false to disable
+     */
+    fun setFocusTracking(enabled: Boolean) {}
+
+    /**
      * Set synchronized update mode (DEC Private Mode 2026).
      * When enabled, display rendering is suppressed until mode is disabled.
      * When disabled, any pending updates are flushed.

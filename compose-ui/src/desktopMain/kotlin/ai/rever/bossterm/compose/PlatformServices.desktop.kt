@@ -2,6 +2,8 @@ package ai.rever.bossterm.compose
 
 import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
 import ai.rever.bossterm.compose.util.UrlOpener
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
@@ -59,23 +61,20 @@ class DesktopClipboardService : PlatformServices.ClipboardService {
 }
 
 class DesktopFileSystemService : PlatformServices.FileSystemService {
-    override suspend fun fileExists(path: String): Boolean {
-        // TODO: Track 6 - Implement file operations
-        return java.io.File(path).exists()
+    override suspend fun fileExists(path: String): Boolean = withContext(Dispatchers.IO) {
+        java.io.File(path).exists()
     }
 
-    override suspend fun readTextFile(path: String): String? {
-        // TODO: Track 6 - Implement file reading
-        return try {
+    override suspend fun readTextFile(path: String): String? = withContext(Dispatchers.IO) {
+        try {
             java.io.File(path).readText()
         } catch (e: Exception) {
             null
         }
     }
 
-    override suspend fun writeTextFile(path: String, content: String): Boolean {
-        // TODO: Track 6 - Implement file writing
-        return try {
+    override suspend fun writeTextFile(path: String, content: String): Boolean = withContext(Dispatchers.IO) {
+        try {
             java.io.File(path).writeText(content)
             true
         } catch (e: Exception) {

@@ -1568,6 +1568,10 @@ class BossTerminal(
         myDisplay.setSynchronizedUpdate(enabled)
     }
 
+    override fun setFocusTracking(enabled: Boolean) {
+        myDisplay.setFocusTracking(enabled)
+    }
+
     override fun setMouseFormat(mouseFormat: MouseFormat?) {
         mouseFormat?.let {
             myMouseFormat = it

@@ -1323,9 +1323,12 @@ class BossEmulator(dataStream: TerminalDataStream, terminal: Terminal?) :
                     return true
                 }
 
-                1004 ->           // stub focus gained/lost events for now
+                1004 -> {
+                    // Focus tracking: CSI I on focus gain, CSI O on focus loss
                     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Mouse-Tracking
+                    setModeEnabled(TerminalMode.FocusTracking, enabled)
                     return true
+                }
 
                 1005 -> {
                     if (enabled) {

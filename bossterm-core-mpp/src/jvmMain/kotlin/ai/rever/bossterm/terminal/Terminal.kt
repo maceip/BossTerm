@@ -195,6 +195,19 @@ interface Terminal {
 
     fun setBracketedPasteMode(enabled: Boolean)
 
+    // ===== Focus Tracking (DECSET 1004) =====
+
+    /**
+     * Enable or disable focus event tracking (DECSET 1004).
+     * When enabled, the terminal sends CSI I on focus gain and CSI O on focus loss.
+     * Used by TUI applications (vim, tmux, etc.) to detect window focus changes.
+     *
+     * Default implementation is a no-op for backwards compatibility.
+     *
+     * @param enabled true to enable focus tracking, false to disable
+     */
+    fun setFocusTracking(enabled: Boolean) {}
+
     // ===== Synchronized Update Mode (DEC Private Mode 2026) =====
 
     /**
