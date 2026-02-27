@@ -253,17 +253,35 @@ object CLIInstaller {
             tempFile.setExecutable(true)
 
             val installPath = getInstallPath()
+
+            // Validate paths contain no shell metacharacters to prevent injection.
+            // Both paths are used as arguments (not shell strings) below, but
+            // macOS osascript requires an AppleScript string which is unavoidable.
+            validatePathSafe(tempFile.absolutePath)
+            validatePathSafe(installPath)
+
+            // Create a helper script that takes src/dst as positional arguments,
+            // avoiding any path interpolation in shell strings.
+            val helperScript = File.createTempFile("bossterm_install_helper", ".sh")
+            helperScript.writeText("#!/bin/sh\ncp -- \"\$1\" \"\$2\" && chmod +x \"\$2\"\n")
+            helperScript.setExecutable(true)
+
             val process = if (isMacOS) {
-                // macOS: Use osascript to run with admin privileges
-                val script = """
-                    do shell script "cp '${tempFile.absolutePath}' '$installPath' && chmod +x '$installPath'" with administrator privileges
-                """.trimIndent()
+                // macOS: osascript requires a shell-string, but we delegate to the
+                // helper script so only the helper path is interpolated (validated above).
+                val escapedHelper = appleScriptEscape(helperScript.absolutePath)
+                val escapedSrc = appleScriptEscape(tempFile.absolutePath)
+                val escapedDst = appleScriptEscape(installPath)
+                val script = "do shell script quoted form of \"$escapedHelper\" & \" \" & " +
+                    "quoted form of \"$escapedSrc\" & \" \" & " +
+                    "quoted form of \"$escapedDst\" with administrator privileges"
                 ProcessBuilder("osascript", "-e", script)
             } else if (isLinux) {
-                // Linux: Use pkexec (PolicyKit) for GUI privilege escalation
-                ProcessBuilder("pkexec", "sh", "-c", "cp '${tempFile.absolutePath}' '$installPath' && chmod +x '$installPath'")
+                // Linux: pkexec with discrete argv entries — no shell-string composition
+                ProcessBuilder("pkexec", helperScript.absolutePath, tempFile.absolutePath, installPath)
             } else {
                 tempFile.delete()
+                helperScript.delete()
                 return InstallResult.Error("Unsupported platform. Please manually copy the script to $installPath")
             }
 
@@ -271,6 +289,7 @@ object CLIInstaller {
             val proc = process.start()
             val exitCode = proc.waitFor()
             tempFile.delete()
+            helperScript.delete()
 
             if (exitCode == 0) {
                 InstallResult.Success
@@ -287,17 +306,38 @@ object CLIInstaller {
         }
     }
 
+    /**
+     * Validate that a path is safe for use in shell contexts.
+     * Rejects paths containing shell metacharacters that could enable injection.
+     */
+    internal fun validatePathSafe(path: String) {
+        val dangerous = setOf('\'', '"', '`', '$', '\\', ';', '&', '|', '\n', '\r', '\u0000')
+        for (ch in path) {
+            require(ch !in dangerous) {
+                "Path contains unsafe character '${ch}': $path"
+            }
+        }
+    }
+
+    /**
+     * Escape a string for use inside an AppleScript double-quoted string literal.
+     */
+    private fun appleScriptEscape(s: String): String {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+    }
+
     private fun uninstallWithAdminPrivileges(): InstallResult {
         return try {
             val installPath = getInstallPath()
+            validatePathSafe(installPath)
+
             val process = if (isMacOS) {
-                // macOS: Use osascript
-                val script = """
-                    do shell script "rm -f '$installPath'" with administrator privileges
-                """.trimIndent()
+                // macOS: Use osascript with quoted form to avoid shell injection
+                val escapedPath = appleScriptEscape(installPath)
+                val script = "do shell script \"rm -f \" & quoted form of \"$escapedPath\" with administrator privileges"
                 ProcessBuilder("osascript", "-e", script)
             } else if (isLinux) {
-                // Linux: Use pkexec
+                // Linux: pkexec with discrete argv entries — no shell-string composition
                 ProcessBuilder("pkexec", "rm", "-f", installPath)
             } else {
                 return InstallResult.Error("Unsupported platform. Please manually remove $installPath")

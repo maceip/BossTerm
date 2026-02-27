@@ -2,6 +2,7 @@ package ai.rever.bossterm.compose.hyperlinks
 
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
 /**
  * Resolves and validates file paths for hyperlink detection.
@@ -22,7 +23,21 @@ object FilePathResolver {
      */
     private val pathCacheByNamespace = ConcurrentHashMap<String, ConcurrentHashMap<String, Pair<Boolean, Long>>>()
     private const val CACHE_TTL_MS = 5000L // 5 seconds
-    private const val MAX_CACHE_SIZE = 1000
+    internal const val MAX_CACHE_SIZE = 1000
+    internal const val MAX_NAMESPACES = 64
+
+    /**
+     * Background executor for async file existence checks.
+     * Single-threaded to limit filesystem I/O pressure from hyperlink detection.
+     */
+    private val ioExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "FilePathResolver-IO").apply { isDaemon = true }
+    }
+
+    /**
+     * Set of paths currently being checked asynchronously, to avoid duplicate work.
+     */
+    private val pendingChecks = ConcurrentHashMap.newKeySet<String>()
 
     /**
      * Windows path pattern (C:\, D:\, etc.)
@@ -85,7 +100,7 @@ object FilePathResolver {
     private fun exists(file: File, namespace: String): Boolean {
         val path = file.absolutePath
         val now = System.currentTimeMillis()
-        val cache = pathCacheByNamespace.getOrPut(namespace) { ConcurrentHashMap() }
+        val cache = getOrCreateNamespaceCache(namespace) ?: return false
 
         // Check cache first
         cache[path]?.let { (exists, timestamp) ->
@@ -120,6 +135,51 @@ object FilePathResolver {
     }
 
     /**
+     * Non-blocking variant of [resolveAndValidate] safe for the render path.
+     *
+     * Returns the resolved file immediately if the cache already holds a fresh result.
+     * On a cache miss, schedules a background filesystem check and returns null.
+     * The caller (render loop) will pick up the result on the next frame.
+     *
+     * This ensures the render thread never performs blocking I/O.
+     */
+    fun resolveAndValidateCached(path: String, workingDirectory: String?): File? {
+        val resolved = resolvePath(path, workingDirectory) ?: return null
+        val namespace = workingDirectory?.let { namespaceFor(File(it)) } ?: namespaceFor(resolved)
+        val absolutePath = resolved.absolutePath
+        val now = System.currentTimeMillis()
+        val cache = getOrCreateNamespaceCache(namespace) ?: return null
+
+        // Return cached result if fresh
+        cache[absolutePath]?.let { (existsResult, timestamp) ->
+            if (now - timestamp < CACHE_TTL_MS) {
+                return if (existsResult) resolved else null
+            }
+        }
+
+        // Cache miss — schedule async check if not already pending
+        if (pendingChecks.add(absolutePath)) {
+            ioExecutor.execute {
+                try {
+                    val existsResult = resolved.exists()
+                    cache[absolutePath] = Pair(existsResult, System.currentTimeMillis())
+
+                    // Evict if over limit
+                    if (cache.size > MAX_CACHE_SIZE) {
+                        val threshold = System.currentTimeMillis() - CACHE_TTL_MS
+                        cache.entries.removeIf { it.value.second < threshold }
+                    }
+                } finally {
+                    pendingChecks.remove(absolutePath)
+                }
+            }
+        }
+
+        // Return null for this frame — hyperlink will appear on next render
+        return null
+    }
+
+    /**
      * Convert a File to a file:// URL string suitable for opening.
      *
      * @param file The file to convert
@@ -137,7 +197,31 @@ object FilePathResolver {
         pathCacheByNamespace.clear()
     }
 
-    private fun namespaceFor(file: File): String {
+    /**
+     * Get or create a namespace cache, with bounds on total namespace count.
+     * Returns null if namespace limit exceeded and this namespace isn't cached.
+     */
+    private fun getOrCreateNamespaceCache(namespace: String): ConcurrentHashMap<String, Pair<Boolean, Long>>? {
+        pathCacheByNamespace[namespace]?.let { return it }
+
+        // Evict stale namespaces before adding new one
+        if (pathCacheByNamespace.size >= MAX_NAMESPACES) {
+            val now = System.currentTimeMillis()
+            val toRemove = pathCacheByNamespace.entries
+                .filter { (_, cache) ->
+                    cache.isEmpty() || cache.values.all { (_, ts) -> now - ts > CACHE_TTL_MS }
+                }
+                .map { it.key }
+            toRemove.forEach { pathCacheByNamespace.remove(it) }
+
+            // Still over limit — refuse to create new namespace
+            if (pathCacheByNamespace.size >= MAX_NAMESPACES) return null
+        }
+
+        return pathCacheByNamespace.getOrPut(namespace) { ConcurrentHashMap() }
+    }
+
+    internal fun namespaceFor(file: File): String {
         val path = file.absolutePath
         return when {
             path.startsWith("//") || path.startsWith("\\\\") -> "unc"
@@ -147,6 +231,11 @@ object FilePathResolver {
             else -> "global"
         }
     }
+
+    /**
+     * The current number of namespace caches. Exposed for testing.
+     */
+    internal fun namespaceCacheCount(): Int = pathCacheByNamespace.size
 
     /**
      * Check if a path string looks like a Unix absolute path.

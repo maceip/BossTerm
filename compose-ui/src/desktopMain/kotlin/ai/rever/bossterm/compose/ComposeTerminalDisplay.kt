@@ -107,6 +107,8 @@ class ComposeTerminalDisplay : TerminalDisplay {
     private val _windowTitle = MutableStateFlow("")
     private val _iconTitle = MutableStateFlow("")
     private val _mouseMode = mutableStateOf(MouseMode.MOUSE_REPORTING_NONE)
+    private val _mouseFormat = mutableStateOf(MouseFormat.MOUSE_FORMAT_XTERM)
+    private val _focusTrackingEnabled = mutableStateOf(false)
     private val _bellTrigger = mutableStateOf(0)
     private val _progressState = mutableStateOf(TerminalDisplay.ProgressState.HIDDEN)
     private val _progressValue = mutableStateOf(0)
@@ -119,6 +121,8 @@ class ComposeTerminalDisplay : TerminalDisplay {
     val bracketedPasteMode: State<Boolean> = _bracketedPasteMode
     val termSize: State<TermSize> = _termSize
     val mouseMode: State<MouseMode> = _mouseMode
+    val mouseFormat: State<MouseFormat> = _mouseFormat
+    val focusTrackingEnabled: State<Boolean> = _focusTrackingEnabled
     val bellTrigger: State<Int> = _bellTrigger
     val progressState: State<TerminalDisplay.ProgressState> = _progressState
     val progressValue: State<Int> = _progressValue
@@ -276,8 +280,21 @@ class ComposeTerminalDisplay : TerminalDisplay {
     }
 
     override fun setMouseFormat(mouseFormat: MouseFormat) {
-        // No-op for now - mouse format handling could be added later
+        _mouseFormat.value = mouseFormat
     }
+
+    /**
+     * Set focus tracking mode (DECSET 1004).
+     * When enabled, the terminal sends ESC [I on focus gain and ESC [O on focus loss.
+     */
+    override fun setFocusTracking(enabled: Boolean) {
+        _focusTrackingEnabled.value = enabled
+    }
+
+    /**
+     * Whether focus tracking (DECSET 1004) is enabled.
+     */
+    fun isFocusTrackingEnabled(): Boolean = _focusTrackingEnabled.value
 
     override fun ambiguousCharsAreDoubleWidth(): Boolean {
         // Default to false
