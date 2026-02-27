@@ -1,6 +1,8 @@
 package ai.rever.bossterm.compose.vcs
 
+import ai.rever.bossterm.compose.util.ShellEscaper
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -8,14 +10,47 @@ import java.util.concurrent.TimeUnit
  * Used by both context menu (VersionControlMenuProvider) and window menu (MenuActions).
  */
 object GitUtils {
+    private data class CacheEntry<T>(val value: T, val checkedAtMs: Long)
+
+    private const val STATUS_CACHE_TTL_MS = 30_000L
+    private val gitRepoCache = ConcurrentHashMap<String, CacheEntry<Boolean>>()
+    private val ghRepoConfiguredCache = ConcurrentHashMap<String, CacheEntry<Boolean>>()
+    private val currentBranchCache = ConcurrentHashMap<String, CacheEntry<String?>>()
+    private val localBranchesCache = ConcurrentHashMap<String, CacheEntry<List<String>>>()
+
+    private fun cacheKey(cwd: String?): String = cwd ?: "<null>"
+
+    private fun <T> readCached(
+        cache: ConcurrentHashMap<String, CacheEntry<T>>,
+        key: String
+    ): T? {
+        val now = System.currentTimeMillis()
+        val cached = cache[key] ?: return null
+        return if (now - cached.checkedAtMs <= STATUS_CACHE_TTL_MS) {
+            cached.value
+        } else {
+            null
+        }
+    }
+
+    private fun <T> writeCached(
+        cache: ConcurrentHashMap<String, CacheEntry<T>>,
+        key: String,
+        value: T
+    ): T {
+        cache[key] = CacheEntry(value = value, checkedAtMs = System.currentTimeMillis())
+        return value
+    }
 
     /**
      * Check if a directory is inside a git repository.
      */
     fun isGitRepo(cwd: String?): Boolean {
         if (cwd == null) return false
+        val key = cacheKey(cwd)
+        readCached(gitRepoCache, key)?.let { return it }
         var process: Process? = null
-        return try {
+        val result = try {
             process = ProcessBuilder("git", "-C", cwd, "rev-parse", "--git-dir")
                 .redirectErrorStream(true)
                 .start()
@@ -33,6 +68,7 @@ object GitUtils {
             process?.errorStream?.close()
             process?.outputStream?.close()
         }
+        return writeCached(gitRepoCache, key, result)
     }
 
     /**
@@ -42,8 +78,10 @@ object GitUtils {
      */
     fun isGhRepoConfigured(cwd: String?): Boolean {
         if (cwd == null) return false
+        val key = cacheKey(cwd)
+        readCached(ghRepoConfiguredCache, key)?.let { return it }
         var process: Process? = null
-        return try {
+        val result = try {
             process = ProcessBuilder("git", "-C", cwd, "config", "--get", "remote.origin.gh-resolved")
                 .redirectErrorStream(true)
                 .start()
@@ -62,6 +100,7 @@ object GitUtils {
             process?.errorStream?.close()
             process?.outputStream?.close()
         }
+        return writeCached(ghRepoConfiguredCache, key, result)
     }
 
     /**
@@ -69,8 +108,10 @@ object GitUtils {
      */
     fun getCurrentBranch(cwd: String?): String? {
         if (cwd == null) return null
+        val key = cacheKey(cwd)
+        readCached(currentBranchCache, key)?.let { return it }
         var process: Process? = null
-        return try {
+        val result = try {
             process = ProcessBuilder("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
                 .redirectErrorStream(true)
                 .start()
@@ -89,6 +130,7 @@ object GitUtils {
             process?.errorStream?.close()
             process?.outputStream?.close()
         }
+        return writeCached(currentBranchCache, key, result)
     }
 
     /**
@@ -96,8 +138,10 @@ object GitUtils {
      */
     fun getLocalBranches(cwd: String?): List<String> {
         if (cwd == null) return emptyList()
+        val key = cacheKey(cwd)
+        readCached(localBranchesCache, key)?.let { return it }
         var process: Process? = null
-        return try {
+        val result = try {
             process = ProcessBuilder("git", "-C", cwd, "branch", "--format=%(refname:short)")
                 .redirectErrorStream(true)
                 .start()
@@ -118,6 +162,7 @@ object GitUtils {
             process?.errorStream?.close()
             process?.outputStream?.close()
         }
+        return writeCached(localBranchesCache, key, result)
     }
 
     // === Git Commands ===
@@ -130,7 +175,7 @@ object GitUtils {
      */
     fun gitCommand(cmd: String, cwd: String?): String {
         return if (cwd != null) {
-            "git -C \"$cwd\" $cmd\n"
+            "git -C ${ShellEscaper.escapePosix(cwd)} $cmd\n"
         } else {
             "git $cmd\n"
         }
@@ -144,7 +189,7 @@ object GitUtils {
      */
     fun ghCommand(cmd: String, cwd: String?): String {
         return if (cwd != null) {
-            "cd \"$cwd\" && gh $cmd\n"
+            "cd ${ShellEscaper.escapePosix(cwd)} && gh $cmd\n"
         } else {
             "gh $cmd\n"
         }

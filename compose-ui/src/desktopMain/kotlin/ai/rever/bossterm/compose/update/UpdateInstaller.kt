@@ -1,6 +1,7 @@
 package ai.rever.bossterm.compose.update
 
 import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
+import ai.rever.bossterm.compose.util.LogRedactor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -29,9 +30,10 @@ object UpdateInstaller {
             throw SecurityException("Failed to canonicalize path: ${downloadFile.absolutePath}")
         }
 
-        val expectedTempDir = File(System.getProperty("java.io.tmpdir"), "bossterm-updates").canonicalPath
-        if (!canonicalPath.startsWith(expectedTempDir)) {
-            println("⚠️ Security Warning: Download file outside expected directory")
+        val expectedTempDir = File(System.getProperty("java.io.tmpdir"), "bossterm-updates").canonicalFile.toPath()
+        val downloadPath = File(canonicalPath).toPath()
+        if (!downloadPath.startsWith(expectedTempDir)) {
+            throw SecurityException("Download file outside expected directory: $canonicalPath")
         }
 
         val filename = downloadFile.name
@@ -153,7 +155,7 @@ object UpdateInstaller {
                     return@withContext openDMGForManualInstallation(downloadFile)
                 }
 
-                println("🎯 Target application path: $currentAppPath")
+                println("🎯 Target application path: ${LogRedactor.redactPath(currentAppPath)}")
 
                 // Verify DMG
                 println("📦 Mounting DMG for verification...")

@@ -34,7 +34,9 @@ data class UpdateInfo(
     val releaseNotes: String,
     val downloadUrl: String? = null,
     val assetSize: Long = 0,
-    val assetName: String = ""
+    val assetName: String = "",
+    val checksumManifestUrl: String? = null,
+    val checksumSignatureUrl: String? = null
 ) {
     val isNewerVersionAvailable: Boolean
         get() = available && latestVersion.isNewerThan(currentVersion)

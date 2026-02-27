@@ -17,10 +17,10 @@ import java.util.concurrent.ConcurrentHashMap
 object FilePathResolver {
     /**
      * Cache for path existence checks to avoid hitting the filesystem on every render.
-     * Key: absolute path string, Value: Pair(exists, timestamp)
+     * Keyed by namespace (mount/cwd segment), then absolute path string.
      * Cache entries expire after 5 seconds to catch file changes.
      */
-    private val pathCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
+    private val pathCacheByNamespace = ConcurrentHashMap<String, ConcurrentHashMap<String, Pair<Boolean, Long>>>()
     private const val CACHE_TTL_MS = 5000L // 5 seconds
     private const val MAX_CACHE_SIZE = 1000
 
@@ -80,26 +80,29 @@ object FilePathResolver {
      * @param file The file to check
      * @return true if the file exists
      */
-    fun exists(file: File): Boolean {
+    fun exists(file: File): Boolean = exists(file, namespaceFor(file))
+
+    private fun exists(file: File, namespace: String): Boolean {
         val path = file.absolutePath
         val now = System.currentTimeMillis()
+        val cache = pathCacheByNamespace.getOrPut(namespace) { ConcurrentHashMap() }
 
         // Check cache first
-        pathCache[path]?.let { (exists, timestamp) ->
+        cache[path]?.let { (exists, timestamp) ->
             if (now - timestamp < CACHE_TTL_MS) {
                 return exists
             }
         }
 
         // Evict old entries if cache is too large
-        if (pathCache.size > MAX_CACHE_SIZE) {
+        if (cache.size > MAX_CACHE_SIZE) {
             val expiredThreshold = now - CACHE_TTL_MS
-            pathCache.entries.removeIf { it.value.second < expiredThreshold }
+            cache.entries.removeIf { it.value.second < expiredThreshold }
         }
 
         // Check filesystem and cache result
         val exists = file.exists()
-        pathCache[path] = Pair(exists, now)
+        cache[path] = Pair(exists, now)
         return exists
     }
 
@@ -112,7 +115,8 @@ object FilePathResolver {
      */
     fun resolveAndValidate(path: String, workingDirectory: String?): File? {
         val resolved = resolvePath(path, workingDirectory) ?: return null
-        return if (exists(resolved)) resolved else null
+        val namespace = workingDirectory?.let { namespaceFor(File(it)) } ?: namespaceFor(resolved)
+        return if (exists(resolved, namespace)) resolved else null
     }
 
     /**
@@ -130,7 +134,18 @@ object FilePathResolver {
      * Call this if you know files have been created/deleted and want immediate refresh.
      */
     fun clearCache() {
-        pathCache.clear()
+        pathCacheByNamespace.clear()
+    }
+
+    private fun namespaceFor(file: File): String {
+        val path = file.absolutePath
+        return when {
+            path.startsWith("//") || path.startsWith("\\\\") -> "unc"
+            windowsPathPattern.matches(path) -> "win:${path.substring(0, 1).uppercase()}"
+            path.startsWith("/") -> path.substringAfter("/", "").substringBefore("/", missingDelimiterValue = "/")
+                .let { segment -> "posix:${if (segment.isBlank()) "/" else segment}" }
+            else -> "global"
+        }
     }
 
     /**

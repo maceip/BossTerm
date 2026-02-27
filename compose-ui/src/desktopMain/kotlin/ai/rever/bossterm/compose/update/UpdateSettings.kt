@@ -1,5 +1,6 @@
 package ai.rever.bossterm.compose.update
 
+import ai.rever.bossterm.compose.util.AtomicFileWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -91,7 +92,11 @@ object UpdateSettingsManager {
     suspend fun saveSettings() = withContext(Dispatchers.IO) {
         try {
             val content = json.encodeToString(UpdateSettingsData.serializer(), UpdateSettings.toData())
-            settingsFile.writeText(content)
+            AtomicFileWriter.writeTextAtomic(
+                file = settingsFile,
+                content = content,
+                backupSuffix = ".bak"
+            )
             println("✅ Saved update settings to ${settingsFile.absolutePath}")
         } catch (e: Exception) {
             println("⚠️ Could not save update settings: ${e.message}")

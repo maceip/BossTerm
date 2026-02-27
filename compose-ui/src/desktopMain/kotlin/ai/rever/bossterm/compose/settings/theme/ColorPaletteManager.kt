@@ -1,6 +1,7 @@
 package ai.rever.bossterm.compose.settings.theme
 
 import ai.rever.bossterm.compose.settings.SettingsManager
+import ai.rever.bossterm.compose.util.AtomicFileWriter
 import ai.rever.bossterm.compose.util.ColorUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -226,7 +227,11 @@ class ColorPaletteManager private constructor(
         try {
             val container = CustomPalettesContainer(palettes = _customPalettes.value)
             val jsonString = json.encodeToString(container)
-            palettesFile.writeText(jsonString)
+            AtomicFileWriter.writeTextAtomic(
+                file = palettesFile,
+                content = jsonString,
+                backupSuffix = ".bak"
+            )
         } catch (e: Exception) {
             System.err.println("Failed to save custom palettes: ${e.message}")
         }

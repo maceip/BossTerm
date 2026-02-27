@@ -1,6 +1,7 @@
 package ai.rever.bossterm.compose
 
 import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
+import ai.rever.bossterm.compose.util.UrlOpener
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
@@ -362,17 +363,7 @@ class DesktopPlatformInfo : PlatformServices.PlatformInfo {
 
 class DesktopBrowserService : PlatformServices.BrowserService {
     override suspend fun openUrl(url: String): Boolean {
-        return try {
-            // TODO: Track 6 - Implement proper browser opening
-            if (java.awt.Desktop.isDesktopSupported()) {
-                java.awt.Desktop.getDesktop().browse(java.net.URI(url))
-                true
-            } else {
-                false
-            }
-        } catch (e: Exception) {
-            false
-        }
+        return UrlOpener.open(url)
     }
 }
 

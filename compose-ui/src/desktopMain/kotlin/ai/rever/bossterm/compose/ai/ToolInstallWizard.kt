@@ -14,7 +14,6 @@ import java.io.File
  */
 data class ToolInstallState(
     val tool: AIAssistantDefinition,
-    val adminPassword: String = "",
     val installMethod: InstallMethod = InstallMethod.SCRIPT,
     val installSuccess: Boolean? = null,
     val terminalKey: Int = 0  // Increment to recreate terminal (for npm retry)
@@ -69,8 +68,7 @@ fun ToolInstallWizard(
             if (needsPassword) {
                 add(WizardStep<ToolInstallState>(
                     id = ToolInstallStepIds.PASSWORD,
-                    displayName = "Password",
-                    canProceed = { it.adminPassword.isNotEmpty() }
+                    displayName = "Admin Access"
                 ))
             }
 
@@ -169,13 +167,9 @@ fun ToolInstallWizard(
     ) { step, state ->
         when (step.id) {
             ToolInstallStepIds.PASSWORD -> {
-                WizardStepBuilders.PasswordContent(
-                    password = state.state.adminPassword,
-                    onPasswordChange = { pwd ->
-                        state.updateState { copy(adminPassword = pwd) }
-                    },
-                    title = "Administrator Password",
-                    description = "Installation of ${tool.displayName} requires administrator privileges."
+                WizardStepBuilders.WelcomeContent(
+                    title = "Administrator Access",
+                    description = "If elevated permissions are needed, the installer will prompt for sudo directly in the terminal."
                 )
             }
 
@@ -196,11 +190,6 @@ fun ToolInstallWizard(
                             "Please wait while we install ${tool.displayName}."
                         },
                         installCommand = currentInstallCommand,
-                        environment = if (state.state.adminPassword.isNotEmpty()) {
-                            mapOf("BOSSTERM_SUDO_PWD" to state.state.adminPassword)
-                        } else {
-                            emptyMap()
-                        },
                         onComplete = { success, _ ->
                             // For brew, check if binary actually exists (more reliable than exit code)
                             val effectiveSuccess = if (isBrewTool) {

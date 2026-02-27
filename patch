@@ -1,0 +1,607 @@
+diff --git a/docs/reviews/2026-02-security-performance-vfs-review.md b/docs/reviews/2026-02-security-performance-vfs-review.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..79fda53a549de065de22b330282a847164c336d8
+--- /dev/null
++++ b/docs/reviews/2026-02-security-performance-vfs-review.md
+@@ -0,0 +1,320 @@
++# BossTerm Deep Technical Review: Security, Performance, and Portable VFS Strategy
++
++Date: 2026-02-26  
++Scope reviewed: `bossterm-core-mpp`, `compose-ui`, `bossterm-app`, build/update pipeline, settings/state persistence.
++
++## 1) Executive summary (least effort, most change)
++
++If you only do **five** things this cycle, do these:
++
++1. **Add integrity verification (SHA-256 + signed manifest) to updates before install** — currently update flow relies on HTTPS and filename checks but does not cryptographically verify payloads.
++2. **Stop persisting or shell-echoing privileged secrets (`BOSSTERM_SUDO_PWD`) in command strings** — move to OS credential store + stdin-only ephemeral token handoff.
++3. **Fix shell command construction for path/context commands (`git -C`, `cd "..." && gh ...`)** — use argument arrays or strong shell escaping utility to avoid command injection on crafted paths.
++4. **Make settings writes atomic + permission-hardened** (`0600`, temp+rename) to prevent corruption and reduce local secret exposure.
++5. **Introduce a portable workspace layer (VFS abstraction + sync engine) with local-first journal**; defer true 9P wire protocol until phase 2. You can get 80% of user value quickly with an abstraction-first design.
++
++These are high-leverage because they harden core trust boundaries (update, privilege, command execution, persistence) while preparing the app for cross-OS “bring my stuff with me” behavior.
++
++---
++
++## 2) Architectural coverage and threat/perf model
++
++### 2.1 Main architectural areas
++
++- **Terminal core/emulation** (`bossterm-core-mpp`): parsing/terminal state, model buffers, text snapshots.
++- **Desktop platform services** (`compose-ui` desktop): PTY process lifecycle, filesystem helpers, URL opening, notifications.
++- **User/workspace state** (`compose-ui` settings/theme managers): JSON persistence under `~/.bossterm`.
++- **Tooling integration** (AI/VCS/shell/custom tools): command generation and execution path.
++- **Auto-update subsystem** (GitHub API download + platform installer scripts).
++- **Packaging/build scripts** (signing/notarization/package assembly).
++
++### 2.2 Trust boundaries
++
++- Untrusted terminal output → hyperlink parser/URL opener.
++- Untrusted local FS/path state → generated shell command strings.
++- Network-delivered update artifacts → local privileged install path.
++- User-configured commands/scripts → shell execution.
++- Sensitive local config state → plain JSON files and process environment.
++
++### 2.3 Performance hot regions
++
++- Render/event loop path performing repeated filesystem/process checks.
++- Process helpers with many short-lived subprocesses (`which`, `git`, `lsof`, `pgrep`).
++- Settings/theme write/read patterns with frequent whole-file rewrites.
++- Update download/progress loops and coroutine scope usage.
++
++---
++
++## 3) Findings by area
++
++## 3.1 Update/security pipeline (Critical)
++
++### What is strong
++- Uses TLS via Ktor clients and request timeouts.
++- Checks file existence/extensions and performs canonical path checks.
++- Implements basic downgrade prevention via version extraction from filenames.
++
++### Gaps
++1. **No cryptographic artifact verification before install**.
++   - Current checks validate extension/path/version, not authenticity.
++   - A supply-chain compromise at release host/CDN/account level can still deliver valid-looking malicious artifacts.
++
++2. **Canonical temp-dir validation is warning-only for out-of-dir file**.
++   - File outside expected temp location logs warning rather than hard fail.
++
++3. **Install scripts execute with elevated permissions on some paths** without signed metadata trust chain.
++
++### Low-effort remediations
++- Add release asset sidecar (`.sha256`) and verify hash before install.
++- Add signed manifest (minisign/cosign/sigstore) for artifact + hash set and validate in app.
++- Change out-of-dir canonical check from warning to hard failure unless explicit override flag.
++
++### Impact
++- **Security risk reduction: very high**.
++- **Engineering effort: low-to-medium** (mostly updater module + release CI).
++
++---
++
++## 3.2 Command construction and injection surface (High)
++
++### Risk vectors
++1. **String-built shell commands with interpolated working directory/arguments** for Git/GH helper flows.
++2. **Tool command builders concatenate command + flags** in plain strings.
++3. **Generated installation commands include dynamic shell fragments**.
++
++### Why this matters
++If any interpolated field contains shell metacharacters or quotes (especially path values), this can produce command confusion/injection when sent to a shell-backed PTY.
++
++### Low-effort remediations
++- Introduce `ShellEscaper.escapePosix()/escapePowershell()` and route all interpolated tokens through it.
++- Prefer process invocation with argv arrays where possible (for non-interactive helper checks).
++- Add centralized “safe command builder” for menu-generated commands.
++
++### Quick tests to add
++- Unit tests for cwd containing quotes, backticks, `$()`, semicolons.
++- Property-style tests for escaping round-trip behavior.
++
++---
++
++## 3.3 Secrets and privileged install handling (High)
++
++### Findings
++- Install command flow references `BOSSTERM_SUDO_PWD` and feeds it into `sudo -S` via shell script text.
++- This increases exposure in process environments, shell history risk (depending on integration), and diagnostic/log leakage risk.
++
++### Low-effort remediations
++- Store privileged token in OS-native keychain/credential manager abstraction.
++- Pass password only through short-lived stdin stream to child process (never env var, never persisted to disk).
++- Scrub related variables after process completion and on failure paths.
++
++### Outcome
++- Strongly reduces accidental credential disclosure and lateral-process harvesting risk.
++
++---
++
++## 3.4 Settings/storage resilience and security (Medium)
++
++### Findings
++- Settings manager writes JSON directly using `writeText` and logs location.
++- No explicit file permission hardening; no atomic temp-write+rename strategy.
++- Corruption risk on crash/interruption during write.
++
++### Low-effort remediations
++- Write to temp file in same dir, `fsync`, atomic rename.
++- Set/create permissions to user-only (where supported).
++- Add backup rotation (`settings.json.bak`) and checksum marker.
++
++### Performance side-effect
++Atomic writes + debounce save calls also reduce unnecessary write amplification.
++
++---
++
++## 3.5 URL/hyperlink and local-file exposure (Medium)
++
++### Findings
++- Hyperlink/file path resolution canonicalizes and checks existence (good baseline).
++- URL opening ultimately delegates to OS open handlers; scheme restrictions should be explicit and centralized.
++
++### Low-effort remediations
++- Add explicit allowlist for URL schemes (`https`, `http`, `file`, optionally `mailto`).
++- Add safe prompt/confirmation for local file opens from terminal output (configurable trust mode).
++- Add telemetry counter (local only) for blocked dangerous schemes.
++
++---
++
++## 3.6 Process lifecycle and concurrency/perf (Medium)
++
++### Findings
++- PTY service does substantial work correctly (UTF-8 boundary handling, graceful/forced kill).
++- However ancillary helpers (`pgrep`, `lsof`, repeated `which` checks, git probes) can be frequent and expensive under heavy tab churn.
++- Update service contains `GlobalScope` usage patterns which are harder to lifecycle-control and can leak work across UI teardown.
++
++### Low-effort remediations
++- Cache command-availability probes with TTL (e.g., 30–120s).
++- Debounce cwd polling and batch process metadata reads.
++- Replace `GlobalScope` with structured scope tied to app/window lifecycle.
++
++---
++
++## 3.7 Dependency and supply-chain posture (Medium)
++
++### Findings
++- Modern stack overall (Kotlin 2.1.x, Compose 1.9.x, Ktor 3.3.x, coroutines 1.10.x).
++- No visible automated SBOM + vulnerability gate in reviewed scripts.
++
++### Low-effort remediations
++- Generate SBOM in CI (CycloneDX Gradle plugin).
++- Add OSS vulnerability scanner gate (OSV/Dependency-Check/Snyk/Trivy in CI).
++- Enforce dependency lockfiles/verification metadata for Gradle.
++
++---
++
++## 4) Performance optimization opportunities (ranked by ROI)
++
++## P0 (high ROI, low effort)
++1. **Command/process probe cache**
++   - Cache `which`, `git repo` checks, branch lookups for short TTL.
++2. **Settings save debounce**
++   - Coalesce rapid updates into a single atomic write.
++3. **Structured coroutine scope in updater/services**
++   - Prevent background work leaks, improve shutdown latency.
++
++## P1 (high ROI, medium effort)
++1. **Background indexing for hyperlinks/path checks**
++   - Keep render thread free; incremental/cache invalidation on cwd change.
++2. **Batch VCS status refresh**
++   - Single scheduled refresh per tab/window rather than per interaction.
++3. **Metrics hooks**
++   - Add lightweight timers around process checks, render frame, update download, settings I/O.
++
++## P2 (medium ROI, medium/high effort)
++1. **Unify process helper service**
++   - Reuse subprocess channels where practical.
++2. **Incremental state persistence model**
++   - Journal-based settings/events then compaction.
++
++---
++
++## 5) Portable VFS (virtio-9p style) strategy
++
++Your stated goal: when a user uses BossTerm on Windows and later on macOS, “all my stuff comes with me.”
++
++A direct kernel-level 9P implementation is not required to deliver user value in BossTerm. The practical path is:
++
++## 5.1 Product interpretation
++Portable “stuff” likely means:
++- terminal profiles, themes, keybindings,
++- snippets/history/workflows,
++- optional workspace metadata and session context,
++- optionally selected files/projects.
++
++This maps well to a **user-space syncable VFS abstraction** first, protocol later.
++
++## 5.2 Proposed architecture (phaseable)
++
++### Layer A — `BossVfs` interface (now)
++Define a platform-agnostic API:
++- `open/read/write/list/stat/mkdir/remove/rename/watch/sync`.
++- URI namespaces: `local://`, `portable://`, `cache://`, `remote://`.
++- Metadata: inode-like ID, version vector, content hash, mtime, permissions map.
++
++### Layer B — local-first object store + metadata journal (now)
++- Content-addressed blobs + SQLite/JSON metadata index.
++- Append-only operation journal for conflict recovery.
++- Compression and optional encryption-at-rest.
++
++### Layer C — sync transport plugin (soon)
++- Start with robust HTTPS sync (chunked upload/download + manifests).
++- Add provider adapters (Git repo backend, S3/WebDAV, self-host).
++- CRDT-lite or LWW+conflict files for merges.
++
++### Layer D — 9P-style protocol adapter (later)
++- Expose the same `BossVfs` over a 9P-like session for advanced integration.
++- Keep it optional and isolated; do not block product value on it.
++
++## 5.3 Why this is “least effort, most change”
++- You can ship cross-OS portability after Layer A+B+C without kernel dependencies.
++- 9P compatibility becomes a transport concern, not a foundational blocker.
++- Existing settings/state code naturally migrates into `portable://config/...` paths.
++
++## 5.4 Data model suggestions
++- `portable://config/settings.json`
++- `portable://themes/*.json`
++- `portable://profiles/*.json`
++- `portable://history/events.log`
++- `portable://workspaces/<id>/...`
++
++Each file has:
++- `contentHash`, `logicalClock`, `deviceId`, `lastWriter`, `encryptionState`.
++
++## 5.5 Conflict strategy
++- Default LWW for low-risk files (UI prefs).
++- Three-way merge for structured JSON where possible.
++- For non-mergeable files: create sibling conflict copy + notification.
++
++## 5.6 Security model for portable VFS
++- End-to-end encryption option with user passphrase-derived key.
++- Per-device key wrapping for convenience mode.
++- Signed manifest per sync transaction.
++- Replay protection via monotonic operation IDs.
++
++## 5.7 Migration plan (practical)
++
++1. Build `BossVfs` interface + local adapter.
++2. Move `SettingsManager` and theme managers to VFS-backed repository API.
++3. Add sync daemon (manual trigger first, then interval/background).
++4. Introduce selective sync UI (“what travels”).
++5. Add optional 9P-style adapter for power users/integration.
++
++---
++
++## 6) Prioritized action plan
++
++## Next 2 weeks (hardening sprint)
++- Implement update SHA/signature verification.
++- Introduce safe command builder + path escaping tests.
++- Remove env-password pattern; add credential provider abstraction.
++- Atomic settings write + permissions hardening.
++
++## Next 4–6 weeks (portability foundation)
++- Introduce `BossVfs` API and local object/journal store.
++- Route settings/themes/profiles through repository layer.
++- Add initial cloud sync adapter + conflict UX for settings.
++
++## 2–3 months (advanced portability)
++- Extend sync to session/workspace artifacts.
++- Optional 9P-style protocol bridge.
++- Add observability dashboard for sync health and perf.
++
++---
++
++## 7) Risk register summary
++
++- **Critical**: Update artifact authenticity not cryptographically enforced.
++- **High**: Command construction injection surface via interpolated shell strings.
++- **High**: Privileged credential handling via environment and shell scripts.
++- **Medium**: Non-atomic settings writes and weak local secret hardening.
++- **Medium**: Ancillary subprocess overhead and lifecycle leaks.
++- **Medium**: Missing automated supply-chain gates in CI.
++
++---
++
++## 8) Final recommendation
++
++Treat this as two parallel tracks:
++
++1. **Trust hardening track (immediate)**: updater verification + command safety + secret handling + atomic persistence.
++2. **Portability track (strategic)**: `BossVfs` abstraction with local-first sync, then optional 9P adapter.
++
++This approach keeps engineering cost controlled while producing visible user value quickly, and it aligns with the cross-OS portability vision without overcommitting to a protocol-specific implementation too early.
++
++## Appendix A: Evidence map (files inspected)
++
++- Update download/check flow: `compose-ui/src/desktopMain/kotlin/ai/rever/bossterm/compose/update/DesktopUpdateService.kt`
++- Update installer validation/install flow: `compose-ui/src/desktopMain/kotlin/ai/rever/bossterm/compose/update/UpdateInstaller.kt`
++- PTY/process + filesystem/browser services: `compose-ui/src/desktopMain/kotlin/ai/rever/bossterm/compose/PlatformServices.desktop.kt`
++- VCS command helpers and command string construction: `compose-ui/src/desktopMain/kotlin/ai/rever/bossterm/compose/vcs/GitUtils.kt`
++- Tool command construction and sudo password env usage: `compose-ui/src/desktopMain/kotlin/ai/rever/bossterm/compose/ai/ToolCommandProvider.kt`
++- Settings load/save implementation: `compose-ui/src/desktopMain/kotlin/ai/rever/bossterm/compose/settings/SettingsManager.kt`
++- Hyperlink/local path resolution: `compose-ui/src/desktopMain/kotlin/ai/rever/bossterm/compose/hyperlinks/FilePathResolver.kt`
++- Module/dependency architecture: `settings.gradle.kts`, `build.gradle.kts`, `compose-ui/build.gradle.kts`, `bossterm-core-mpp/build.gradle.kts`
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/docs/technical-review-security-performance-vfs.md b/docs/technical-review-security-performance-vfs.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f42509b0b4b98bcfd5bf7472e0b06d6c1c386c1
+--- /dev/null
++++ b/docs/technical-review-security-performance-vfs.md
+@@ -0,0 +1,271 @@
++# BossTerm Technical Deep-Dive Review
++
++## Executive Summary
++
++This review focused on **security risk reduction**, **performance optimization**, and the architecture needed to add a **portable VFS (virtio-9p style) layer** so user state can travel between Windows/macOS/Linux.
++
++### Highest ROI (least effort, biggest change)
++
++1. **Harden update integrity checks** (signature/hash validation before install).  
++   _Impact:_ closes highest-severity remote update tampering risk with localized code changes.
++2. **Unify URL opening through `UrlOpener` + URI allowlist** (remove direct `Runtime.exec` paths).  
++   _Impact:_ reduces command/URL handling risk and centralizes policy.
++3. **Replace `GlobalScope` in update flow with lifecycle scope**.  
++   _Impact:_ removes leak/race behavior and improves shutdown determinism.
++4. **Introduce a portable-state abstraction now (`PortableStore`) and back it with host FS first**.  
++   _Impact:_ enables future virtio-9p-like migration with low disruption.
++
++---
++
++## Scope and Architectural Areas Reviewed
++
++- Build/dependency architecture (`build.gradle.kts`, module gradle files).
++- Terminal runtime + PTY process services.
++- Update pipeline (GitHub fetch, download, installer script generation).
++- Hyperlink and URL-open surfaces.
++- Settings/storage model and cross-platform portability readiness.
++- Shell integration and working-directory capture.
++
++---
++
++## Security Review Findings
++
++## 1) Update channel: no cryptographic payload verification (High)
++
++### Observations
++- Update binaries are downloaded over HTTPS from GitHub releases, then installed.
++- Validation currently checks filename/extension, some path checks, and version downgrade checks.
++- There is no mandatory verification of artifact digest/signature against a trusted channel.
++
++### Risk
++A compromised release asset path, poisoned cache, or malicious mirror-style interception scenario (inside trust boundary, CI compromise, account compromise) could lead to installing tampered binaries.
++
++### Least-effort fix
++- Publish `SHA256SUMS` + detached signature per release.
++- Embed release signing public key in app.
++- Verify downloaded artifact digest + signature before installer invocation.
++- Fail closed on mismatch.
++
++### Stretch improvement
++- Add TUF-style metadata or Sigstore/cosign verification for release assets.
++
++---
++
++## 2) Multiple URL opening paths with mixed sanitization (Medium)
++
++### Observations
++- URL opening exists in both centralized utility and direct `Runtime.getRuntime().exec(...)` call sites.
++- Divergent behavior increases policy drift and bypass potential.
++
++### Risk
++Inconsistent URL scheme handling or shell/OS command invocation quirks can open unexpected protocols or malformed targets.
++
++### Least-effort fix
++- Deprecate direct hyperlink opener exec calls.
++- Route all opens via a single `UrlOpener.open(url)` policy gate.
++- Enforce allowed schemes (`https`, `http`, `mailto`, `file` gated by settings).
++- Parse/normalize with `URI` and reject malformed values.
++
++---
++
++## 3) Linux/macOS installer helper scripts are strong but still script-heavy (Medium)
++
++### Observations
++- Update scripts include meaningful escaping and path validation.
++- Scripts still perform privileged operations with broad host access patterns.
++
++### Risk
++Script complexity increases review burden and can hide edge-case injection or path confusion over time.
++
++### Least-effort fix
++- Add strict host/path allowlist checks before script generation and launch.
++- Add immutable temp-file permission controls (0600 where possible).
++- Log structured install events (start, hash verified, elevation path, result).
++
++### Medium-term
++- Move privileged install operation into smaller native helpers or signed platform installer flows where possible.
++
++---
++
++## 4) `GlobalScope` used in update restart handoff (Low-Medium)
++
++### Observations
++- `GlobalScope.launch` is used to delay then exit after update handoff.
++
++### Risk
++Unbounded coroutine lifetime can create racey behavior during app shutdown/restart, and complicates testability.
++
++### Least-effort fix
++- Inject/use a lifecycle-bound `CoroutineScope` from `UpdateManager`/application scope.
++
++---
++
++## 5) Logs may leak sensitive context (Low)
++
++### Observations
++- Update and shell-related areas log paths, versions, and operational details.
++
++### Risk
++In shared systems or collected diagnostics, logs can expose local paths or environment context.
++
++### Least-effort fix
++- Add redaction helper for home paths/usernames.
++- Gate verbose logs behind debug flag.
++
++---
++
++## Performance Optimization Opportunities
++
++## 1) Download implementation duplication (High ROI)
++
++### Observations
++- Similar stream-copy/progress logic appears in more than one update download path.
++
++### Opportunity
++Unifying this into one tested helper improves maintainability and reduces bug/perf drift.
++
++### Least-effort change
++- Extract `downloadToFileWithProgress(...)` utility with buffered channel copy and common throttled progress callbacks.
++
++---
++
++## 2) Reduce process spawn frequency for environment checks (Medium ROI)
++
++### Observations
++- Installer/platform checks use repeated external commands (`which`, etc.).
++
++### Opportunity
++Cache command-availability checks per session.
++
++### Least-effort change
++- Add `CommandAvailabilityCache` with TTL (or static per run) used by update/install + URL-open paths.
++
++---
++
++## 3) URL/hyperlink opening path consolidation (Medium ROI)
++
++Beyond security, this removes duplicate branches and improves throughput for frequent click/open workflows by reusing one validation pipeline.
++
++---
++
++## 4) Portable settings I/O batching (Medium ROI)
++
++### Observations
++- Settings manager eagerly writes on updates and re-saves on load migration.
++
++### Opportunity
++Debounce frequent writes and use atomic temp-file swap to reduce I/O churn and corruption risk.
++
++### Least-effort change
++- Add 100–300ms debounce for burst updates.
++- Write `settings.json.tmp` then atomic move.
++
++---
++
++## Portable VFS (virtio-9p style) Strategy
++
++## Goal
++When users switch machines/OS (Windows ↔ macOS ↔ Linux), they should retain:
++- terminal preferences/theme/keybindings,
++- shell integration metadata,
++- tab/session/workspace metadata (optional),
++- snippets/AI helper presets,
++- lightweight history/state (policy-controlled).
++
++## What “9p-style” means here
++Not a kernel-level virtio implementation in phase 1. Instead:
++- a **portable namespace abstraction** (mount-like paths, capability checks, file ops),
++- pluggable backends (local FS now, sync/remote later),
++- conflict-aware metadata, consistent serialization, and cross-platform path normalization.
++
++## Proposed architecture
++
++### 1) Add a storage abstraction boundary
++Create `PortableStore` interfaces in `compose-ui` (or shared module if expanding to mobile/web):
++- `read(path)`, `write(path, bytes, etag?)`, `list(path)`, `stat(path)`, `delete(path)`,
++- optional `watch(path)` for future live sync.
++
++Mount roots:
++- `/config` (settings, themes),
++- `/state` (non-critical runtime metadata),
++- `/cache` (rebuildable),
++- `/history` (opt-in, encrypted optional).
++
++### 2) Start with LocalFS backend (minimum disruption)
++- Map mount roots to OS-specific dirs (`~/.bossterm/...` etc.)
++- Normalize path separators and case rules at abstraction boundary.
++- Keep current files, but accessed through adapter.
++
++### 3) Add portable bundle format
++- `bossterm-portable.tar.zst` (or zip) with manifest:
++  - schema version,
++  - platform-independent JSON files,
++  - checksums for each member,
++  - optional encrypted sections.
++- Enables export/import immediately (huge user value, low effort).
++
++### 4) Add sync backend later (9p-like remote semantics)
++- Backend options: WebDAV, S3-compatible, Git repo, or custom HTTP API.
++- Use optimistic concurrency (`etag`, vector clock, or per-file revision).
++- Keep authoritative model as files in namespace, not DB lock-in.
++
++### 5) Conflict model
++- Prefer per-file last-write-wins for low-value state.
++- Use merge-aware JSON docs for high-value configs (themes/keymaps/snippets).
++- Surface merge conflicts in UI only when needed.
++
++---
++
++## Portable VFS Roadmap (Effort vs Impact)
++
++## Phase 0 (1–2 days): groundwork
++- Introduce `PortableStore` interfaces + local adapter.
++- Route settings read/write through abstraction.
++- Add schema version field to portable config docs.
++
++## Phase 1 (2–4 days): immediate user value
++- Export/import portable bundle from UI/CLI.
++- Include settings/themes/assistant config/hyperlink patterns.
++- Add checksum verification for import.
++
++## Phase 2 (3–6 days): multi-device sync beta
++- Add one remote backend (recommend WebDAV or Git-based backend first).
++- Add sync-now command + background pull on startup.
++- Conflict log in a diagnostics panel.
++
++## Phase 3 (future): “true 9p-like” live mounted workspace
++- On-demand file access with watch/notify semantics.
++- Optional shared project metadata and shell-session continuity.
++
++---
++
++## Suggested Backlog (Prioritized)
++
++## P0 – do first (security + high ROI)
++1. Artifact signature/hash verification in update flow.
++2. Single URL opening policy and scheme allowlist.
++3. Replace `GlobalScope` usage in update restart path.
++4. Add `PortableStore` + route settings access through it.
++
++## P1 – next sprint
++1. Portable export/import bundle with checksum manifest.
++2. Debounced + atomic settings writes.
++3. Shared download helper and command-availability cache.
++
++## P2 – strategic
++1. Remote backend (WebDAV/Git/S3-compatible).
++2. Conflict-resolution UX.
++3. Optional encryption for secrets/history payloads.
++
++---
++
++## “Least Effort, Most Change” Implementation Plan
++
++1. **Week 1 hardening patch**: update verification + URL policy unification + lifecycle scope cleanup.  
++   _Result_: immediate security posture uplift with small code surface.
++2. **Week 1 portability patch**: introduce `PortableStore` and keep local behavior unchanged.  
++   _Result_: architecture ready for migration without destabilizing terminal core.
++3. **Week 2 user-facing portability**: export/import bundle.  
++   _Result_: users can move setups across OS now, before live sync backend.
++
++This sequence minimizes risk while maximizing visible user value and long-term architectural leverage.
+ 
+EOF
+)

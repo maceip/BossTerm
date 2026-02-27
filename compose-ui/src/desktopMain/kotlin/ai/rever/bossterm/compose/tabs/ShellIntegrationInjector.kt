@@ -2,6 +2,7 @@ package ai.rever.bossterm.compose.tabs
 
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.security.MessageDigest
 
 /**
  * Injects BossTerm shell integration into shell processes.
@@ -26,6 +27,7 @@ object ShellIntegrationInjector {
         "bossterm_shell_integration.bash",
         "fish/vendor_conf.d/bossterm_shell_integration.fish"
     )
+    private const val RESOURCE_MANIFEST_NAME = "manifest.sha256"
 
     // Lazy-initialized integration directory
     private val integrationDir: File by lazy {
@@ -138,6 +140,13 @@ object ShellIntegrationInjector {
             targetDir.mkdirs()
         }
 
+        val expectedHashes = computeExpectedResourceHashes()
+        val manifestFile = File(targetDir, RESOURCE_MANIFEST_NAME)
+
+        if (isCurrentExtractionValid(targetDir, manifestFile, expectedHashes)) {
+            return
+        }
+
         for (resource in SHELL_INTEGRATION_RESOURCES) {
             val targetFile = File(targetDir, resource)
 
@@ -147,16 +156,11 @@ object ShellIntegrationInjector {
             // Extract resource (always overwrite to ensure latest version)
             try {
                 val resourcePath = "shell-integration/$resource"
-                // Use anonymous object pattern for more reliable classloader access (same as FontUtils)
-                val inputStream = object {}.javaClass.classLoader?.getResourceAsStream(resourcePath)
-                    ?: Thread.currentThread().contextClassLoader?.getResourceAsStream(resourcePath)
-                    ?: ShellIntegrationInjector::class.java.classLoader?.getResourceAsStream(resourcePath)
+                val bytes = readResourceBytes(resourcePath)
 
-                if (inputStream != null) {
-                    inputStream.use { input ->
-                        targetFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
+                if (bytes != null) {
+                    targetFile.outputStream().use { output ->
+                        output.write(bytes)
                     }
                     // Make scripts executable
                     if (resource.endsWith(".bash") || resource.endsWith(".zsh") ||
@@ -171,5 +175,106 @@ object ShellIntegrationInjector {
                 System.err.println("[ShellIntegration] Error extracting $resource: ${e.message}")
             }
         }
+
+        writeManifest(manifestFile, expectedHashes)
+    }
+
+    private fun computeExpectedResourceHashes(): Map<String, String> {
+        val hashes = linkedMapOf<String, String>()
+        for (resource in SHELL_INTEGRATION_RESOURCES) {
+            val resourcePath = "shell-integration/$resource"
+            val bytes = readResourceBytes(resourcePath)
+            if (bytes == null) {
+                System.err.println("[ShellIntegration] Resource not found for manifest: $resourcePath")
+                continue
+            }
+            hashes[resource] = sha256(bytes)
+        }
+        return hashes
+    }
+
+    private fun readResourceBytes(resourcePath: String): ByteArray? {
+        val inputStream = object {}.javaClass.classLoader?.getResourceAsStream(resourcePath)
+            ?: Thread.currentThread().contextClassLoader?.getResourceAsStream(resourcePath)
+            ?: ShellIntegrationInjector::class.java.classLoader?.getResourceAsStream(resourcePath)
+        return inputStream?.use { it.readBytes() }
+    }
+
+    private fun isCurrentExtractionValid(
+        targetDir: File,
+        manifestFile: File,
+        expectedHashes: Map<String, String>
+    ): Boolean {
+        if (!manifestFile.exists()) {
+            return false
+        }
+
+        val existingManifest = readManifest(manifestFile)
+        if (existingManifest != expectedHashes) {
+            return false
+        }
+
+        for ((resource, expectedHash) in expectedHashes) {
+            val extractedFile = File(targetDir, resource)
+            if (!extractedFile.exists()) {
+                return false
+            }
+            if (!sha256(extractedFile).equals(expectedHash, ignoreCase = true)) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private fun readManifest(manifestFile: File): Map<String, String> {
+        val hashes = linkedMapOf<String, String>()
+        return try {
+            manifestFile.readLines()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("#") }
+                .forEach { line ->
+                    val firstSpace = line.indexOf(' ')
+                    if (firstSpace > 0 && firstSpace + 1 < line.length) {
+                        val hash = line.substring(0, firstSpace).trim().lowercase()
+                        val path = line.substring(firstSpace + 1).trim()
+                        if (path.isNotEmpty()) {
+                            hashes[path] = hash
+                        }
+                    }
+                }
+            hashes
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun writeManifest(manifestFile: File, hashes: Map<String, String>) {
+        val content = buildString {
+            appendLine("# BossTerm shell integration resource manifest")
+            hashes.toSortedMap().forEach { (path, hash) ->
+                appendLine("$hash $path")
+            }
+        }
+        manifestFile.writeText(content)
+    }
+
+    private fun sha256(file: File): String {
+        return file.inputStream().use { input ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(8192)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read > 0) digest.update(buffer, 0, read)
+            }
+            digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }
+    }
+
+    private fun sha256(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(bytes)
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 }

@@ -1,12 +1,17 @@
 package ai.rever.bossterm.compose.shell
 
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Shared utility functions for shell customization operations.
  * Used by both context menu (ShellCustomizationMenuProvider) and onboarding wizard.
  */
 object ShellCustomizationUtils {
+    private data class CommandCheckCacheEntry(val installed: Boolean, val checkedAtMs: Long)
+
+    private val commandCheckCache = ConcurrentHashMap<String, CommandCheckCacheEntry>()
+    private const val COMMAND_CHECK_TTL_MS = 60_000L
 
     // ===== Shell Resolution =====
 
@@ -122,8 +127,16 @@ object ShellCustomizationUtils {
      * Uses 'where' on Windows, 'which' on Unix/macOS.
      */
     fun isCommandInstalled(command: String): Boolean {
+        val cacheKey = "${if (isWindows()) "windows" else "unix"}:${command.lowercase()}"
+        val now = System.currentTimeMillis()
+        commandCheckCache[cacheKey]?.let { cached ->
+            if (now - cached.checkedAtMs <= COMMAND_CHECK_TTL_MS) {
+                return cached.installed
+            }
+        }
+
         var process: Process? = null
-        return try {
+        val installed = try {
             val checkCommand = if (isWindows()) "where" else "which"
             process = ProcessBuilder(checkCommand, command)
                 .redirectErrorStream(true)
@@ -142,6 +155,8 @@ object ShellCustomizationUtils {
             process?.errorStream?.close()
             process?.outputStream?.close()
         }
+        commandCheckCache[cacheKey] = CommandCheckCacheEntry(installed = installed, checkedAtMs = now)
+        return installed
     }
 
     // ===== Uninstall Commands =====

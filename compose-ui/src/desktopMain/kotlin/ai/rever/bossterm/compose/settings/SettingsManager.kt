@@ -1,8 +1,15 @@
 package ai.rever.bossterm.compose.settings
 
+import ai.rever.bossterm.compose.util.AtomicFileWriter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -18,6 +25,9 @@ import java.io.File
  */
 class SettingsManager(private val customSettingsPath: String? = null) {
     private val _settings = MutableStateFlow(TerminalSettings.DEFAULT)
+    private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val saveLock = Any()
+    private var pendingSaveJob: Job? = null
 
     /**
      * Current settings as a StateFlow (reactive)
@@ -61,7 +71,7 @@ class SettingsManager(private val customSettingsPath: String? = null) {
      */
     fun updateSettings(newSettings: TerminalSettings) {
         _settings.value = newSettings
-        saveToFile()
+        scheduleSaveToFile()
     }
 
     /**
@@ -82,9 +92,33 @@ class SettingsManager(private val customSettingsPath: String? = null) {
      * Save current settings to file
      */
     fun saveToFile() {
+        synchronized(saveLock) {
+            pendingSaveJob?.cancel()
+            pendingSaveJob = null
+        }
+        persistSettingsToFile(_settings.value)
+    }
+
+    private fun scheduleSaveToFile() {
+        val job = saveScope.launch {
+            delay(SETTINGS_SAVE_DEBOUNCE_MS)
+            persistSettingsToFile(_settings.value)
+        }
+
+        synchronized(saveLock) {
+            pendingSaveJob?.cancel()
+            pendingSaveJob = job
+        }
+    }
+
+    private fun persistSettingsToFile(settingsSnapshot: TerminalSettings) {
         try {
-            val jsonString = json.encodeToString(_settings.value)
-            settingsFile.writeText(jsonString)
+            val jsonString = json.encodeToString(settingsSnapshot)
+            AtomicFileWriter.writeTextAtomic(
+                file = settingsFile,
+                content = jsonString,
+                backupSuffix = ".bak"
+            )
             println("Settings saved to: ${settingsFile.absolutePath}")
         } catch (e: Exception) {
             System.err.println("Failed to save settings: ${e.message}")
@@ -121,6 +155,8 @@ class SettingsManager(private val customSettingsPath: String? = null) {
     }
 
     companion object {
+        private const val SETTINGS_SAVE_DEBOUNCE_MS = 150L
+
         /**
          * Global singleton instance using default settings path
          */

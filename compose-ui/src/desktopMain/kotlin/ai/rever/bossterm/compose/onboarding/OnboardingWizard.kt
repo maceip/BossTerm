@@ -36,7 +36,7 @@ import java.util.concurrent.TimeUnit
  */
 sealed class OnboardingStep(val index: Int, val displayName: String) {
     object Welcome : OnboardingStep(0, "Welcome")
-    object Password : OnboardingStep(1, "Password")  // Admin password for installations
+    object Password : OnboardingStep(1, "Admin Access")
     object Prerequisites : OnboardingStep(2, "Prerequisites")  // Windows and macOS
     object ShellSelection : OnboardingStep(3, "Shell")
     object ShellCustomization : OnboardingStep(4, "Customization")
@@ -48,28 +48,28 @@ sealed class OnboardingStep(val index: Int, val displayName: String) {
     object Complete : OnboardingStep(10, "Complete")
 
     companion object {
-        // All steps including Password and Prerequisites (Windows and macOS)
+        // All steps including Admin Access and Prerequisites (Windows and macOS)
         val allStepsWithPrerequisites: List<OnboardingStep> by lazy {
             listOf(
                 Welcome, Password, Prerequisites, ShellSelection, ShellCustomization,
                 VersionControl, AIAssistants, Review, Installing, GhAuth, Complete
             )
         }
-        // Steps for Linux (has Password for sudo, but no Prerequisites/package manager step)
+        // Steps for Linux (has Admin Access info, but no Prerequisites/package manager step)
         val allStepsLinux: List<OnboardingStep> by lazy {
             listOf(
                 Welcome, Password, ShellSelection, ShellCustomization,
                 VersionControl, AIAssistants, Review, Installing, GhAuth, Complete
             )
         }
-        // Visible steps with Password and Prerequisites (Windows and macOS)
+        // Visible steps with Admin Access and Prerequisites (Windows and macOS)
         val visibleStepsWithPrerequisites: List<OnboardingStep> by lazy {
             listOf(
                 Welcome, Password, Prerequisites, ShellSelection, ShellCustomization,
                 VersionControl, AIAssistants, Review
             )
         }
-        // Visible steps for Linux (has Password, but no Prerequisites)
+        // Visible steps for Linux (has Admin Access, but no Prerequisites)
         val visibleStepsLinux: List<OnboardingStep> by lazy {
             listOf(
                 Welcome, Password, ShellSelection, ShellCustomization,
@@ -203,7 +203,6 @@ fun OnboardingWizard(
     var installCommand by remember { mutableStateOf("") }
     var installationComplete by remember { mutableStateOf(false) }
     var ghInstalledDuringWizard by remember { mutableStateOf(false) }
-    var adminPassword by remember { mutableStateOf("") }  // Admin password for sudo commands
     var homebrewInstalling by remember { mutableStateOf(false) }  // Track homebrew installation state
 
     // Focus requester for primary action button (Get Started / Next)
@@ -290,7 +289,6 @@ fun OnboardingWizard(
                                 OnboardingStep.Welcome -> WelcomeStep()
                                 OnboardingStep.Prerequisites -> PrerequisitesStep(
                                     installedTools = installedTools,
-                                    adminPassword = adminPassword,
                                     onRefreshTools = {
                                         scope.launch {
                                             isDetecting = true
@@ -302,10 +300,7 @@ fun OnboardingWizard(
                                         homebrewInstalling = installing
                                     }
                                 )
-                                OnboardingStep.Password -> PasswordStep(
-                                    password = adminPassword,
-                                    onPasswordChange = { adminPassword = it }
-                                )
+                                OnboardingStep.Password -> PasswordStep()
                                 OnboardingStep.ShellSelection -> ShellSelectionStep(
                                     selections = selections,
                                     installedTools = installedTools,
@@ -333,7 +328,6 @@ fun OnboardingWizard(
                                 )
                                 OnboardingStep.Installing -> InstallingStep(
                                     installCommand = installCommand,
-                                    adminPassword = adminPassword,
                                     onComplete = { success ->
                                         if (success) {
                                             installationComplete = true
@@ -439,7 +433,7 @@ fun OnboardingWizard(
                             OnboardingStep.Welcome -> {
                                 Button(
                                     onClick = {
-                                        // All platforms go to Password (needed for sudo on all platforms)
+                                        // All platforms show admin-access guidance before install planning.
                                         currentStep = OnboardingStep.Password
                                     },
                                     colors = ButtonDefaults.buttonColors(
@@ -547,11 +541,7 @@ fun OnboardingWizard(
                                 }
                             }
                             else -> {
-                                // Disable Next on Password step if password is empty
-                                val canProceed = when (currentStep) {
-                                    is OnboardingStep.Password -> adminPassword.isNotEmpty()
-                                    else -> true
-                                }
+                                val canProceed = true
                                 val goToNextStep = {
                                     if (canProceed) {
                                         val nextIndex = allSteps.indexOf(currentStep) + 1
@@ -1133,8 +1123,7 @@ private fun buildInstallCommandInternal(selections: OnboardingSelections, instal
     val needsSudo = !isWindows && (sudoCommands.isNotEmpty() || userCommands.any { it.contains("starship") })
     if (needsSudo) {
         allCommands.add("echo '🔐 Authenticating administrator access...'")
-        // Use sudo -S to read password from stdin (provided via env var)
-        allCommands.add("echo \"\$BOSSTERM_SUDO_PWD\" | sudo -S -v 2>/dev/null")
+        allCommands.add("sudo -v")
         // Keep sudo credentials alive in background
         allCommands.add("(while true; do sudo -n true; sleep 50; kill -0 \"\$\$\" 2>/dev/null || exit; done) &")
         allCommands.add("SUDO_KEEPALIVE_PID=\$!")

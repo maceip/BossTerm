@@ -1,6 +1,6 @@
 package ai.rever.bossterm.compose.hyperlinks
 
-import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
+import ai.rever.bossterm.compose.util.UrlOpener
 import ai.rever.bossterm.terminal.model.TerminalLine
 import ai.rever.bossterm.terminal.model.pool.VersionedBufferSnapshot
 import ai.rever.bossterm.terminal.util.ColumnConversionUtils
@@ -396,20 +396,8 @@ object HyperlinkDetector {
      * @param url The URL to open
      */
     fun openUrl(url: String) {
-        try {
-            when {
-                ShellCustomizationUtils.isMacOS() -> {
-                    Runtime.getRuntime().exec(arrayOf("open", url))
-                }
-                ShellCustomizationUtils.isWindows() -> {
-                    Runtime.getRuntime().exec(arrayOf("cmd", "/c", "start", url))
-                }
-                else -> {
-                    Runtime.getRuntime().exec(arrayOf("xdg-open", url))
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (!UrlOpener.open(url)) {
+            System.err.println("Failed to open hyperlink URL: $url")
         }
     }
 

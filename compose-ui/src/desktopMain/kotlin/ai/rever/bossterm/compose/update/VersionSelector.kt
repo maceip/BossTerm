@@ -54,6 +54,12 @@ fun VersionManagementSection(
     val scope = rememberCoroutineScope()
     val currentVersion = Version.CURRENT
 
+    DisposableEffect(Unit) {
+        onDispose {
+            updateService.cleanup()
+        }
+    }
+
     // Fetch releases on first load and when pre-release toggle changes
     LaunchedEffect(state.showPreReleases) {
         state.isLoading = true

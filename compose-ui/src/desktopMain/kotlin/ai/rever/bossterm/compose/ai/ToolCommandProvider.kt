@@ -244,7 +244,7 @@ class ToolCommandProvider {
 
         /**
          * Get platform-aware install command for Homebrew.
-         * Uses password from BOSSTERM_SUDO_PWD env var for sudo authentication.
+         * Uses interactive sudo auth (no password env var).
          * Same script as OnboardingSteps for consistency.
          */
         fun getBrewInstallCommand(): String {
@@ -259,8 +259,8 @@ echo ""
 echo "This will install Homebrew, the missing package manager for macOS."
 echo ""
 
-# Authenticate sudo using password from environment variable
-echo "${'$'}BOSSTERM_SUDO_PWD" | sudo -S -v 2>/dev/null
+# Authenticate sudo interactively
+sudo -v
 
 # Keep sudo credentials alive in background
 (while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done) &
@@ -401,11 +401,10 @@ echo "Run 'source ${"$"}HOME/.cargo/env' to update your current shell"
         /**
          * Get Linux install command with package manager detection.
          * Tries apt, dnf, then pacman in order.
-         * Uses BOSSTERM_SUDO_PWD environment variable for password if available.
+         * Uses interactive sudo authentication.
          */
         private fun getLinuxInstallCommand(aptPkg: String, dnfPkg: String, pacmanPkg: String): String {
-            // Validate sudo credentials using password from env var (same pattern as OnboardingWizard)
-            return "echo \"\$BOSSTERM_SUDO_PWD\" | sudo -S -v 2>/dev/null && " +
+            return "sudo -v && " +
                    "{ command -v apt >/dev/null 2>&1 && sudo apt install -y $aptPkg; } || " +
                    "{ command -v dnf >/dev/null 2>&1 && sudo dnf install -y $dnfPkg; } || " +
                    "{ command -v pacman >/dev/null 2>&1 && sudo pacman -S --noconfirm $pacmanPkg; } || " +

@@ -131,38 +131,29 @@ fun WelcomeStep() {
 }
 
 /**
- * Password step for collecting admin password.
- * This password will be used for all sudo commands during installations.
+ * Admin access step.
+ *
+ * BossTerm no longer passes passwords via environment variables.
+ * Install commands will prompt for sudo directly in the terminal when needed.
  */
 @Composable
-fun PasswordStep(
-    password: String,
-    onPasswordChange: (String) -> Unit
-) {
-    var passwordVisible by remember { mutableStateOf(false) }
-
+fun PasswordStep() {
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
     ) {
         Text(
-            text = "Administrator Password",
+            text = "Administrator Access",
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
             color = TextPrimary
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = "Some installations require administrator privileges. Enter your password once here, and it will be used for all installations.",
+            text = "When an install needs elevated privileges, you'll enter your system password directly in the terminal prompt (sudo).",
             fontSize = 14.sp,
             color = TextSecondary
         )
         Spacer(modifier = Modifier.height(24.dp))
-
-        val passwordLabel = when {
-            ShellCustomizationUtils.isMacOS() -> "macOS Password"
-            ShellCustomizationUtils.isWindows() -> "Windows Password"
-            else -> "System Password"
-        }
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -171,42 +162,14 @@ fun PasswordStep(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = passwordLabel,
+                    text = "Security improvement",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
                     color = TextPrimary
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = onPasswordChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    visualTransformation = if (passwordVisible)
-                        VisualTransformation.None
-                    else
-                        PasswordVisualTransformation(),
-                    singleLine = true,
-                    trailingIcon = {
-                        IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                            Icon(
-                                imageVector = if (passwordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                                contentDescription = if (passwordVisible) "Hide password" else "Show password",
-                                tint = TextMuted
-                            )
-                        }
-                    },
-                    colors = TextFieldDefaults.outlinedTextFieldColors(
-                        textColor = TextPrimary,
-                        cursorColor = AccentColor,
-                        focusedBorderColor = AccentColor,
-                        unfocusedBorderColor = BorderColor,
-                        backgroundColor = BackgroundColor
-                    ),
-                    placeholder = { Text("Enter your password", color = TextMuted) }
-                )
-                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Your password is stored only in memory during this session and is never saved to disk.",
+                    text = "Passwords are no longer injected through environment variables. Authentication now happens in the shell prompt only.",
                     fontSize = 12.sp,
                     color = TextMuted
                 )
@@ -224,7 +187,6 @@ fun PasswordStep(
 @Composable
 fun PrerequisitesStep(
     installedTools: InstalledTools,
-    adminPassword: String,  // Password passed from wizard
     onRefreshTools: () -> Unit,
     onInstallStateChange: (installing: Boolean) -> Unit
 ) {
@@ -291,8 +253,8 @@ fun PrerequisitesStep(
         }"
     """.trimIndent().replace("\n", " ")
 
-    // Homebrew installation command for macOS - writes script to temp file for reliable execution
-    // Uses sudo -S to read password from environment variable (passed via BOSSTERM_SUDO_PWD)
+    // Homebrew installation command for macOS - writes script to temp file for reliable execution.
+    // Uses interactive sudo auth (no password environment variables).
     val homebrewInstallCommand = """
 cat > /tmp/bossterm_brew_install.sh << 'BREWINSTALL_EOF'
 #!/bin/bash
@@ -303,8 +265,8 @@ echo ""
 echo "This will install Homebrew, the missing package manager for macOS."
 echo ""
 
-# Authenticate sudo using password from environment variable
-echo "${'$'}BOSSTERM_SUDO_PWD" | sudo -S -v 2>/dev/null
+# Authenticate sudo interactively
+sudo -v
 
 # Keep sudo credentials alive in background
 (while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done) &
@@ -546,7 +508,6 @@ chmod +x /tmp/bossterm_brew_install.sh && /tmp/bossterm_brew_install.sh
             ) {
                 EmbeddableTerminal(
                     initialCommand = homebrewInstallCommand,
-                    environment = mapOf("BOSSTERM_SUDO_PWD" to adminPassword),
                     onInitialCommandComplete = { success, _ ->
                         homebrewInstalling = false
                         homebrewInstallSuccess = success
@@ -1127,7 +1088,6 @@ private fun ReviewItem(
 @Composable
 fun InstallingStep(
     installCommand: String,
-    adminPassword: String,
     onComplete: (success: Boolean) -> Unit
 ) {
     var isRunning by remember { mutableStateOf(true) }
@@ -1160,7 +1120,6 @@ fun InstallingStep(
         ) {
             EmbeddableTerminal(
                 initialCommand = installCommand,
-                environment = mapOf("BOSSTERM_SUDO_PWD" to adminPassword),
                 onInitialCommandComplete = { success, exitCode ->
                     isRunning = false
                     installSuccess = success

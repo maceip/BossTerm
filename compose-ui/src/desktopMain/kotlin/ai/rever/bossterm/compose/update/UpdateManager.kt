@@ -175,6 +175,7 @@ class UpdateManager {
      */
     fun cleanup() {
         stopPeriodicChecks()
+        updateService.cleanup()
         scope.cancel()
     }
 }

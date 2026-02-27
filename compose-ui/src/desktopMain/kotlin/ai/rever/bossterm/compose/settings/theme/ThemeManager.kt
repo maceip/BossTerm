@@ -1,6 +1,7 @@
 package ai.rever.bossterm.compose.settings.theme
 
 import ai.rever.bossterm.compose.settings.SettingsManager
+import ai.rever.bossterm.compose.util.AtomicFileWriter
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -188,7 +189,11 @@ class ThemeManager private constructor(
         try {
             val container = CustomThemesContainer(themes = _customThemes.value)
             val jsonString = json.encodeToString(container)
-            themesFile.writeText(jsonString)
+            AtomicFileWriter.writeTextAtomic(
+                file = themesFile,
+                content = jsonString,
+                backupSuffix = ".bak"
+            )
         } catch (e: Exception) {
             System.err.println("Failed to save custom themes: ${e.message}")
         }
