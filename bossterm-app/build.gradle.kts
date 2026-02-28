@@ -3,6 +3,8 @@ import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import java.util.Properties
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
+import java.io.File
+import java.util.concurrent.TimeUnit
 
 // Interface for injecting ExecOperations into tasks
 // Replaces deprecated project.exec() calls for Gradle 9.0 compatibility
@@ -78,7 +80,24 @@ compose.desktop {
         )
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Rpm)
+            val isLinux = System.getProperty("os.name").lowercase().contains("linux")
+            val requestedRpm = providers.gradleProperty("includeRpmPackaging").orNull == "true"
+            val includeRpm = requestedRpm && supportsRpmPackaging()
+            val packageFormats = mutableListOf<TargetFormat>()
+
+            if (isLinux) {
+                packageFormats += TargetFormat.Deb
+                if (includeRpm) {
+                    packageFormats += TargetFormat.Rpm
+                    println("✅ Including RPM packaging")
+                } else if (requestedRpm && !includeRpm) {
+                    println("⚠️ Skipping RPM packaging: unsupported JDK/runtime environment")
+                }
+            } else {
+                packageFormats += TargetFormat.Dmg
+            }
+
+            targetFormats(*packageFormats.toTypedArray())
 
             packageName = "BossTerm"
             packageVersion = project.version.toString().removeSuffix("-SNAPSHOT")
@@ -163,6 +182,31 @@ compose.desktop {
                 configurationFiles.from(project.file("../compose-ui/proguard-rules.pro"))
             }
         }
+    }
+}
+
+fun supportsRpmPackaging(): Boolean {
+    val jpackage = File(System.getProperty("java.home"), "bin/jpackage")
+    if (!jpackage.exists()) return false
+
+    return try {
+        val process = ProcessBuilder(jpackage.absolutePath, "--type", "rpm", "--help")
+            .redirectErrorStream(true)
+            .start()
+
+        val completed = process.waitFor(2, TimeUnit.SECONDS)
+        if (!completed) {
+            process.destroyForcibly()
+            return false
+        }
+
+        if (process.exitValue() != 0) {
+            return false
+        }
+
+        process.inputStream.bufferedReader().readText().contains("rpm", ignoreCase = true)
+    } catch (e: Exception) {
+        false
     }
 }
 
@@ -347,16 +391,29 @@ afterEvaluate {
 
     // Linux: Fix .desktop file after packaging
     if (isLinux) {
-        tasks.findByName("fixLinuxDesktopFile")?.apply {
-            mustRunAfter("packageDeb", "packageRpm")
+        val packageDebTask = tasks.findByName("packageDeb")
+        val packageRpmTask = tasks.findByName("packageRpm")
+        val packageReleaseRpmTask = tasks.findByName("packageReleaseRpm")
+        val fixLinuxDesktopFileTask = tasks.findByName("fixLinuxDesktopFile")
+
+        fixLinuxDesktopFileTask?.apply {
+            dependsOn(packageDebTask)
+            packageRpmTask?.let { dependsOn(it) }
+            packageReleaseRpmTask?.let { dependsOn(it) }
         }
-        tasks.findByName("packageDeb")?.apply {
+
+        packageDebTask?.apply {
             finalizedBy("fixLinuxDesktopFile")
             println("📝 packageDeb will be finalized by fixLinuxDesktopFile")
         }
-        tasks.findByName("packageRpm")?.apply {
+
+        packageRpmTask?.apply {
             finalizedBy("fixLinuxDesktopFile")
             println("📝 packageRpm will be finalized by fixLinuxDesktopFile")
+        }
+
+        packageReleaseRpmTask?.apply {
+            finalizedBy("fixLinuxDesktopFile")
         }
     }
 }
