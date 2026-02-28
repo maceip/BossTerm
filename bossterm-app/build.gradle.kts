@@ -80,7 +80,10 @@ compose.desktop {
         )
 
         nativeDistributions {
-            val isLinux = System.getProperty("os.name").lowercase().contains("linux")
+            val osName = System.getProperty("os.name").lowercase()
+            val isLinux = osName.contains("linux")
+            val isWindows = osName.contains("windows")
+            val isMac = osName.contains("mac")
             val requestedRpm = providers.gradleProperty("includeRpmPackaging").orNull == "true"
             val includeRpm = requestedRpm && supportsRpmPackaging()
             val packageFormats = mutableListOf<TargetFormat>()
@@ -93,6 +96,11 @@ compose.desktop {
                 } else if (requestedRpm && !includeRpm) {
                     println("⚠️ Skipping RPM packaging: unsupported JDK/runtime environment")
                 }
+            } else if (isMac) {
+                packageFormats += TargetFormat.Dmg
+            } else if (isWindows) {
+                packageFormats += TargetFormat.Msi
+                packageFormats += TargetFormat.Exe
             } else {
                 packageFormats += TargetFormat.Dmg
             }
