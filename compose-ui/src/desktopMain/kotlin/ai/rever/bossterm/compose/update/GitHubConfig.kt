@@ -2,8 +2,6 @@ package ai.rever.bossterm.compose.update
 
 import ai.rever.bossterm.compose.security.CredentialProviders
 import ai.rever.bossterm.compose.util.SubprocessHelper
-import java.io.File
-import java.util.Properties
 
 /**
  * Configuration for GitHub API access.
@@ -15,10 +13,9 @@ import java.util.Properties
  * The GitHub token is obtained from multiple sources (in order):
  * 1. Environment variable: GITHUB_TOKEN
  * 2. System property: GITHUB_TOKEN
- * 3. local.properties file: GITHUB_TOKEN=ghp_...
- * 4. OS credential provider (service=bossterm.github, account=api_token)
- * 5. GitHub CLI (gh auth token)
- * 6. No token (fallback to unauthenticated access)
+ * 3. OS credential provider (service=bossterm.github, account=api_token)
+ * 4. GitHub CLI (gh auth token)
+ * 5. No token (fallback to unauthenticated access)
  */
 object GitHubConfig {
     /**
@@ -27,7 +24,6 @@ object GitHubConfig {
      * Returns null if not configured (will use unauthenticated access).
      */
     val token: String? by lazy {
-        // Try explicit configuration first
         getConfiguredToken() ?: getTokenFromGitHubCLI()
     }
 
@@ -38,38 +34,28 @@ object GitHubConfig {
         get() = token != null
 
     /**
-     * Get token from environment, system property, or local.properties
+     * Get token from environment or system property.
      */
     private fun getConfiguredToken(): String? {
-        // 1. Environment variable
+        // 1. Environment variable (secure: set by user's shell profile or CI)
         System.getenv("GITHUB_TOKEN")?.takeIf { it.isNotBlank() }?.let { return it }
 
-        // 2. System property
+        // 2. System property (secure: set by JVM launch flags)
         System.getProperty("GITHUB_TOKEN")?.takeIf { it.isNotBlank() }?.let { return it }
 
-        // 3. local.properties file
-        try {
-            val localProps = File("local.properties")
-            if (localProps.exists()) {
-                val props = Properties()
-                localProps.inputStream().use { props.load(it) }
-                props.getProperty("GITHUB_TOKEN")?.takeIf { it.isNotBlank() }?.let { return it }
-            }
-        } catch (e: Exception) {
-            // Ignore errors reading local.properties
-        }
-
-        // 4. OS credential provider abstraction
+        // 3. OS credential provider abstraction
         CredentialProviders.default.read(service = "bossterm.github", account = "api_token")
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
-
         return null
     }
 
     /**
-     * Attempt to retrieve token from GitHub CLI (gh auth token)
-     * Returns null if gh is not installed or not authenticated
+     * Attempt to retrieve token from GitHub CLI (gh auth token).
+     * Returns null if gh is not installed, not authenticated, or times out.
+     *
+     * Uses a bounded timeout to prevent blocking the application startup
+     * if the gh process hangs (e.g., waiting for keyring unlock).
      */
     private fun getTokenFromGitHubCLI(): String? {
         return try {

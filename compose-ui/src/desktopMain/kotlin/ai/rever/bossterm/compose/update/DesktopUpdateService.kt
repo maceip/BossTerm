@@ -458,12 +458,12 @@ class DesktopUpdateService {
     }
 
     private fun isSigningKeyConfigured(): Boolean {
-        return UpdateSigningKeys.updateManifestPublicKeyPem.isNotBlank()
+        return UpdateSigningKeys.isKeyConfigured
     }
 
     private fun verifyManifestSignature(manifestBytes: ByteArray, signatureBytes: ByteArray): Boolean {
         val keyPem = UpdateSigningKeys.updateManifestPublicKeyPem
-        if (keyPem.isBlank()) {
+        if (keyPem.isNullOrBlank()) {
             return false
         }
 
