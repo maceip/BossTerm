@@ -1,8 +1,8 @@
 package ai.rever.bossterm.compose.update
 
-import java.io.BufferedReader
+import ai.rever.bossterm.compose.security.CredentialProviders
+import ai.rever.bossterm.compose.util.SubprocessHelper
 import java.io.File
-import java.io.InputStreamReader
 import java.util.Properties
 
 /**
@@ -16,8 +16,9 @@ import java.util.Properties
  * 1. Environment variable: GITHUB_TOKEN
  * 2. System property: GITHUB_TOKEN
  * 3. local.properties file: GITHUB_TOKEN=ghp_...
- * 4. GitHub CLI (gh auth token)
- * 5. No token (fallback to unauthenticated access)
+ * 4. OS credential provider (service=bossterm.github, account=api_token)
+ * 5. GitHub CLI (gh auth token)
+ * 6. No token (fallback to unauthenticated access)
  */
 object GitHubConfig {
     /**
@@ -58,6 +59,11 @@ object GitHubConfig {
             // Ignore errors reading local.properties
         }
 
+        // 4. OS credential provider abstraction
+        CredentialProviders.default.read(service = "bossterm.github", account = "api_token")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+
         return null
     }
 
@@ -67,17 +73,9 @@ object GitHubConfig {
      */
     private fun getTokenFromGitHubCLI(): String? {
         return try {
-            val process = ProcessBuilder("gh", "auth", "token")
-                .redirectErrorStream(true)
-                .start()
-
-            val output = BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                reader.readText().trim()
-            }
-
-            val exitCode = process.waitFor()
-
-            if (exitCode == 0 && output.isNotBlank() && !output.contains("not logged in", ignoreCase = true)) {
+            val result = SubprocessHelper.run("gh", "auth", "token", timeoutMs = 3_000L)
+            val output = result.stdout
+            if (result.success && output.isNotBlank() && !output.contains("not logged in", ignoreCase = true)) {
                 println("✅ Using GitHub token from GitHub CLI (gh)")
                 output
             } else {

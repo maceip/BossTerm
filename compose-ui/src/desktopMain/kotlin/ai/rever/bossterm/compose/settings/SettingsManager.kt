@@ -1,6 +1,5 @@
 package ai.rever.bossterm.compose.settings
 
-import ai.rever.bossterm.compose.util.AtomicFileWriter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -61,6 +60,10 @@ class SettingsManager(private val customSettingsPath: String? = null) {
             File(settingsDir, "settings.json")
         }
     }
+    private val journalStore: SettingsJournalStore by lazy {
+        SettingsJournalStore(settingsFile = settingsFile, json = json)
+    }
+    private var journalWritesSinceCompaction: Int = 0
 
     init {
         loadFromFile()
@@ -113,13 +116,19 @@ class SettingsManager(private val customSettingsPath: String? = null) {
 
     private fun persistSettingsToFile(settingsSnapshot: TerminalSettings) {
         try {
-            val jsonString = json.encodeToString(settingsSnapshot)
-            AtomicFileWriter.writeTextAtomic(
-                file = settingsFile,
-                content = jsonString,
-                backupSuffix = ".bak"
-            )
-            println("Settings saved to: ${settingsFile.absolutePath}")
+            journalStore.append(settingsSnapshot)
+            journalWritesSinceCompaction++
+
+            val shouldCompact =
+                !settingsFile.exists() ||
+                    journalWritesSinceCompaction >= JOURNAL_COMPACTION_WRITE_THRESHOLD ||
+                    journalStore.sizeBytes() >= JOURNAL_COMPACTION_SIZE_THRESHOLD_BYTES
+
+            if (shouldCompact) {
+                journalStore.compact(settingsSnapshot, backupSuffix = ".bak")
+                journalWritesSinceCompaction = 0
+                println("Settings compacted to: ${settingsFile.absolutePath}")
+            }
         } catch (e: Exception) {
             System.err.println("Failed to save settings: ${e.message}")
             e.printStackTrace()
@@ -133,20 +142,35 @@ class SettingsManager(private val customSettingsPath: String? = null) {
      */
     fun loadFromFile() {
         try {
-            if (settingsFile.exists()) {
-                val jsonString = settingsFile.readText()
-                val loadedSettings = json.decodeFromString<TerminalSettings>(jsonString)
-                _settings.value = loadedSettings
-                println("Settings loaded from: ${settingsFile.absolutePath}")
+            var loadedSettings = TerminalSettings.DEFAULT
+            var loadedFromSource = false
 
-                // Re-save to migrate settings file with any new fields added in updates
-                // This ensures new settings (like globalHotkey*) are written with defaults
-                saveToFile()
-            } else {
-                println("No settings file found, using defaults")
-                // Save defaults on first run
-                saveToFile()
+            if (settingsFile.exists()) {
+                try {
+                    val jsonString = settingsFile.readText()
+                    loadedSettings = json.decodeFromString<TerminalSettings>(jsonString)
+                    loadedFromSource = true
+                    println("Settings loaded from: ${settingsFile.absolutePath}")
+                } catch (e: Exception) {
+                    System.err.println("Failed to parse settings file, will try journal: ${e.message}")
+                }
             }
+
+            val journalSettings = journalStore.loadLatestOrNull()
+            if (journalSettings != null) {
+                loadedSettings = journalSettings
+                loadedFromSource = true
+                println("Settings replayed from journal: ${settingsFile.absolutePath}.journal")
+            }
+
+            if (!loadedFromSource) {
+                println("No settings state found, using defaults")
+            }
+
+            _settings.value = loadedSettings
+
+            // Re-save to migrate settings files with any new fields added in updates.
+            saveToFile()
         } catch (e: Exception) {
             System.err.println("Failed to load settings, using defaults: ${e.message}")
             e.printStackTrace()
@@ -156,6 +180,8 @@ class SettingsManager(private val customSettingsPath: String? = null) {
 
     companion object {
         private const val SETTINGS_SAVE_DEBOUNCE_MS = 150L
+        private const val JOURNAL_COMPACTION_WRITE_THRESHOLD = 32
+        private const val JOURNAL_COMPACTION_SIZE_THRESHOLD_BYTES = 256 * 1024L
 
         /**
          * Global singleton instance using default settings path

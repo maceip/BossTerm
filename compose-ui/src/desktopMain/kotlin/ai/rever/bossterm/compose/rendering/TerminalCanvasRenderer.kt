@@ -12,12 +12,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import ai.rever.bossterm.compose.SelectionMode
+import ai.rever.bossterm.compose.hyperlinks.FilePathResolver
 import ai.rever.bossterm.compose.hyperlinks.Hyperlink
 import ai.rever.bossterm.compose.hyperlinks.HyperlinkDetector
 import ai.rever.bossterm.compose.hyperlinks.HyperlinkRegistry
 import ai.rever.bossterm.compose.settings.TerminalSettings
 import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
 import ai.rever.bossterm.compose.util.ColorUtils
+import ai.rever.bossterm.compose.util.PerformanceCounters
 import ai.rever.bossterm.terminal.CursorShape
 import ai.rever.bossterm.terminal.model.TerminalLine
 import ai.rever.bossterm.terminal.model.pool.VersionedBufferSnapshot
@@ -263,6 +265,10 @@ data class CachedMeasurement(
  * Separates rendering logic from the composable for better maintainability.
  */
 object TerminalCanvasRenderer {
+    private val hyperlinkScanCacheLock = Any()
+    private val hyperlinkRowFingerprintCache = mutableMapOf<Int, Int>()
+    private val hyperlinkByRowCache = mutableMapOf<Int, List<Hyperlink>>()
+
 
     /**
      * LRU cache for text measurements (issue #147 - special character rendering optimization).
@@ -384,6 +390,10 @@ object TerminalCanvasRenderer {
         for (row in 0 until ctx.visibleRows) {
             val lineIndex = row - ctx.scrollOffset
             val line = snapshot.getLine(lineIndex)
+            if (!HyperlinkDetector.canContainHyperlink(line.text, ctx.detectFilePaths)) {
+                PerformanceCounters.increment("hyperlink_rows_skipped_fastpath")
+                continue
+            }
 
             var col = 0
             var visualCol = 0  // Track visual position separately from buffer position
@@ -516,8 +526,12 @@ object TerminalCanvasRenderer {
     fun detectAllHyperlinks(ctx: RenderingContext): Map<Int, List<Hyperlink>> {
         val snapshot = ctx.bufferSnapshot
         val hyperlinksCache = mutableMapOf<Int, MutableList<Hyperlink>>()
+        val nextFingerprints = mutableMapOf<Int, Int>()
+        val filePathCacheEpoch = if (ctx.detectFilePaths) FilePathResolver.cacheEpoch() else 0L
+        var reusedRows = 0L
 
         for (row in 0 until ctx.visibleRows) {
+            PerformanceCounters.increment("hyperlink_rows_scanned")
             val lineIndex = row - ctx.scrollOffset
             val line = snapshot.getLine(lineIndex)
 
@@ -542,19 +556,55 @@ object TerminalCanvasRenderer {
                 true
             }
 
+            val rowFingerprint = computeHyperlinkRowFingerprint(
+                line = line,
+                lineIndex = lineIndex,
+                isPreviousLineWrapped = isPreviousLineWrapped,
+                ctx = ctx,
+                filePathCacheEpoch = filePathCacheEpoch
+            )
+            nextFingerprints[row] = rowFingerprint
+
+            val cachedHyperlinksForRow = synchronized(hyperlinkScanCacheLock) {
+                if (hyperlinkRowFingerprintCache[row] == rowFingerprint) {
+                    hyperlinkByRowCache[row]
+                } else {
+                    null
+                }
+            }
+
+            if (cachedHyperlinksForRow != null) {
+                hyperlinksCache[row] = cachedHyperlinksForRow.toMutableList()
+                reusedRows++
+                continue
+            }
+
             if (shouldDetect) {
                 val isPartOfWrappedSequence = isPreviousLineWrapped || line.isWrapped
                 val hyperlinks = if (isPartOfWrappedSequence) {
+                    PerformanceCounters.increment("hyperlink_wrapped_scan")
                     // Part of a wrapped sequence - use wrapped detection
                     // This walks backwards to find start even if off-screen
                     HyperlinkDetector.detectHyperlinksWithWrapping(
-                        snapshot, row, ctx.scrollOffset, ctx.visibleCols,
-                        ctx.workingDirectory, ctx.detectFilePaths, ctx.hyperlinkRegistry
+                        snapshot = snapshot,
+                        screenRow = row,
+                        scrollOffset = ctx.scrollOffset,
+                        terminalWidth = ctx.visibleCols,
+                        workingDirectory = ctx.workingDirectory,
+                        detectFilePaths = ctx.detectFilePaths,
+                        registry = ctx.hyperlinkRegistry,
+                        deferFilePathExistenceChecks = true
                     )
                 } else {
+                    PerformanceCounters.increment("hyperlink_singleline_scan")
                     // Single line - use standard detection
                     HyperlinkDetector.detectHyperlinks(
-                        line.text, row, ctx.workingDirectory, ctx.detectFilePaths, ctx.hyperlinkRegistry
+                        text = line.text,
+                        row = row,
+                        workingDirectory = ctx.workingDirectory,
+                        detectFilePaths = ctx.detectFilePaths,
+                        registry = ctx.hyperlinkRegistry,
+                        deferFilePathExistenceChecks = true
                     )
                 }
 
@@ -569,7 +619,35 @@ object TerminalCanvasRenderer {
             }
         }
 
+        synchronized(hyperlinkScanCacheLock) {
+            hyperlinkRowFingerprintCache.clear()
+            hyperlinkRowFingerprintCache.putAll(nextFingerprints)
+            hyperlinkByRowCache.clear()
+            hyperlinkByRowCache.putAll(hyperlinksCache.mapValues { it.value.toList() })
+        }
+        PerformanceCounters.increment("hyperlink_rows_reused", reusedRows)
+
         return hyperlinksCache
+    }
+
+    private fun computeHyperlinkRowFingerprint(
+        line: TerminalLine,
+        lineIndex: Int,
+        isPreviousLineWrapped: Boolean,
+        ctx: RenderingContext,
+        filePathCacheEpoch: Long
+    ): Int {
+        var hash = 17
+        hash = hash * 31 + lineIndex
+        hash = hash * 31 + line.text.hashCode()
+        hash = hash * 31 + if (line.isWrapped) 1 else 0
+        hash = hash * 31 + if (isPreviousLineWrapped) 1 else 0
+        hash = hash * 31 + ctx.visibleCols
+        hash = hash * 31 + if (ctx.detectFilePaths) 1 else 0
+        hash = hash * 31 + (ctx.workingDirectory?.hashCode() ?: 0)
+        hash = hash * 31 + System.identityHashCode(ctx.hyperlinkRegistry)
+        hash = hash * 31 + (filePathCacheEpoch xor (filePathCacheEpoch ushr 32)).toInt()
+        return hash
     }
 
     /**

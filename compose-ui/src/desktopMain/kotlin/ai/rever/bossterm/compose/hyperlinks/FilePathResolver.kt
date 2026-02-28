@@ -1,7 +1,13 @@
 package ai.rever.bossterm.compose.hyperlinks
 
+import ai.rever.bossterm.compose.util.PerformanceCounters
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Resolves and validates file paths for hyperlink detection.
@@ -21,6 +27,9 @@ object FilePathResolver {
      * Cache entries expire after 5 seconds to catch file changes.
      */
     private val pathCacheByNamespace = ConcurrentHashMap<String, ConcurrentHashMap<String, Pair<Boolean, Long>>>()
+    private val inFlightChecks = ConcurrentHashMap<String, Boolean>()
+    private val cacheEpochCounter = AtomicLong(0L)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private const val CACHE_TTL_MS = 5000L // 5 seconds
     private const val MAX_CACHE_SIZE = 1000
 
@@ -80,9 +89,13 @@ object FilePathResolver {
      * @param file The file to check
      * @return true if the file exists
      */
-    fun exists(file: File): Boolean = exists(file, namespaceFor(file))
+    fun exists(file: File): Boolean = exists(file, namespaceFor(file), deferFileExistenceCheck = false)
 
-    private fun exists(file: File, namespace: String): Boolean {
+    fun exists(file: File, deferFileExistenceCheck: Boolean): Boolean {
+        return exists(file, namespaceFor(file), deferFileExistenceCheck = deferFileExistenceCheck)
+    }
+
+    private fun exists(file: File, namespace: String, deferFileExistenceCheck: Boolean): Boolean {
         val path = file.absolutePath
         val now = System.currentTimeMillis()
         val cache = pathCacheByNamespace.getOrPut(namespace) { ConcurrentHashMap() }
@@ -90,6 +103,7 @@ object FilePathResolver {
         // Check cache first
         cache[path]?.let { (exists, timestamp) ->
             if (now - timestamp < CACHE_TTL_MS) {
+                PerformanceCounters.increment("path_cache_hit")
                 return exists
             }
         }
@@ -100,10 +114,44 @@ object FilePathResolver {
             cache.entries.removeIf { it.value.second < expiredThreshold }
         }
 
+        if (deferFileExistenceCheck) {
+            PerformanceCounters.increment("path_cache_deferred")
+            scheduleAsyncExistenceCheck(file = file, namespace = namespace, path = path)
+            return false
+        }
+
         // Check filesystem and cache result
+        PerformanceCounters.increment("path_cache_miss")
         val exists = file.exists()
         cache[path] = Pair(exists, now)
+        cacheEpochCounter.incrementAndGet()
         return exists
+    }
+
+    private fun scheduleAsyncExistenceCheck(file: File, namespace: String, path: String) {
+        val checkKey = "$namespace::$path"
+        if (inFlightChecks.putIfAbsent(checkKey, true) != null) {
+            return
+        }
+
+        ioScope.launch {
+            try {
+                val exists = file.exists()
+                val now = System.currentTimeMillis()
+                val cache = pathCacheByNamespace.getOrPut(namespace) { ConcurrentHashMap() }
+
+                if (cache.size > MAX_CACHE_SIZE) {
+                    val expiredThreshold = now - CACHE_TTL_MS
+                    cache.entries.removeIf { it.value.second < expiredThreshold }
+                }
+
+                cache[path] = Pair(exists, now)
+                cacheEpochCounter.incrementAndGet()
+                PerformanceCounters.increment("path_cache_async_completed")
+            } finally {
+                inFlightChecks.remove(checkKey)
+            }
+        }
     }
 
     /**
@@ -113,10 +161,14 @@ object FilePathResolver {
      * @param workingDirectory The current working directory for relative paths
      * @return Resolved File if it exists, null otherwise
      */
-    fun resolveAndValidate(path: String, workingDirectory: String?): File? {
+    fun resolveAndValidate(
+        path: String,
+        workingDirectory: String?,
+        deferFileExistenceCheck: Boolean = false
+    ): File? {
         val resolved = resolvePath(path, workingDirectory) ?: return null
         val namespace = workingDirectory?.let { namespaceFor(File(it)) } ?: namespaceFor(resolved)
-        return if (exists(resolved, namespace)) resolved else null
+        return if (exists(resolved, namespace, deferFileExistenceCheck)) resolved else null
     }
 
     /**
@@ -135,6 +187,24 @@ object FilePathResolver {
      */
     fun clearCache() {
         pathCacheByNamespace.clear()
+        inFlightChecks.clear()
+        cacheEpochCounter.incrementAndGet()
+    }
+
+    fun cacheEpoch(): Long = cacheEpochCounter.get()
+
+    fun cacheStats(): Map<String, Long> {
+        val namespaces = pathCacheByNamespace.size.toLong()
+        val entries = pathCacheByNamespace.values.sumOf { it.size.toLong() }
+        return mapOf(
+            "namespaces" to namespaces,
+            "entries" to entries,
+            "hits" to PerformanceCounters.get("path_cache_hit"),
+            "misses" to PerformanceCounters.get("path_cache_miss"),
+            "deferred" to PerformanceCounters.get("path_cache_deferred"),
+            "async_completed" to PerformanceCounters.get("path_cache_async_completed"),
+            "epoch" to cacheEpochCounter.get()
+        )
     }
 
     private fun namespaceFor(file: File): String {

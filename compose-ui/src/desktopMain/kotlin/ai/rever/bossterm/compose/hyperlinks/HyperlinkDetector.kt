@@ -64,6 +64,7 @@ data class JoinedLineInfo(
  * @property quickCheck Optional fast check before applying regex (for performance)
  * @property pathValidator Optional validator for file paths. Takes (match, workingDir) and returns
  *           the resolved file:// URL if the path exists, or null to skip this match.
+ *           Third argument indicates whether file existence checks should be deferred.
  *           When set, urlTransformer is ignored and pathValidator takes precedence.
  */
 data class HyperlinkPattern(
@@ -72,7 +73,7 @@ data class HyperlinkPattern(
     val priority: Int = 0,
     val urlTransformer: (matchedText: String) -> String = { it },
     val quickCheck: ((line: String) -> Boolean)? = null,
-    val pathValidator: ((match: String, workingDir: String?) -> String?)? = null
+    val pathValidator: ((match: String, workingDir: String?, deferFileExistenceChecks: Boolean) -> String?)? = null
 )
 
 /**
@@ -177,8 +178,8 @@ class HyperlinkRegistry {
             regex = Regex("""(?:^|(?<=[\s"'`]))~/[^\s<>"'`\[\](){}|;]+"""),
             priority = -5,
             quickCheck = { FilePathResolver.looksLikeHomePath(it) },
-            pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+            pathValidator = { match, cwd, deferFileExistenceChecks ->
+                FilePathResolver.resolveAndValidate(match, cwd, deferFileExistenceChecks)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }
@@ -190,8 +191,8 @@ class HyperlinkRegistry {
             regex = Regex("""(?:^|(?<=[\s"'`]))\.\.?/[^\s<>"'`\[\](){}|;]+"""),
             priority = -6,
             quickCheck = { FilePathResolver.looksLikeRelativePath(it) },
-            pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+            pathValidator = { match, cwd, deferFileExistenceChecks ->
+                FilePathResolver.resolveAndValidate(match, cwd, deferFileExistenceChecks)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }
@@ -204,8 +205,8 @@ class HyperlinkRegistry {
             regex = Regex("""(?:^|(?<=[\s"'`]))/(?:[^\s<>"'`\[\](){}|;:/]+/)*[^\s<>"'`\[\](){}|;:/]+"""),
             priority = -7,
             quickCheck = { FilePathResolver.looksLikeUnixPath(it) },
-            pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+            pathValidator = { match, cwd, deferFileExistenceChecks ->
+                FilePathResolver.resolveAndValidate(match, cwd, deferFileExistenceChecks)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }
@@ -217,8 +218,8 @@ class HyperlinkRegistry {
             regex = Regex("""(?:^|(?<=[\s"'`]))[A-Za-z]:\\[^\s<>"'`\[\](){}|;]+"""),
             priority = -7,
             quickCheck = { FilePathResolver.looksLikeWindowsPath(it) },
-            pathValidator = { match, cwd ->
-                FilePathResolver.resolveAndValidate(match, cwd)?.let {
+            pathValidator = { match, cwd, deferFileExistenceChecks ->
+                FilePathResolver.resolveAndValidate(match, cwd, deferFileExistenceChecks)?.let {
                     FilePathResolver.toFileUrl(it)
                 }
             }
@@ -329,6 +330,7 @@ object HyperlinkDetector {
      * @param workingDirectory The current working directory for resolving relative paths (optional)
      * @param detectFilePaths Whether to detect file paths as hyperlinks (default: true)
      * @param registry The pattern registry to use (default: global registry)
+     * @param deferFilePathExistenceChecks When true, path existence checks are deferred asynchronously
      * @return List of detected hyperlinks, sorted by column position
      */
     fun detectHyperlinks(
@@ -336,7 +338,8 @@ object HyperlinkDetector {
         row: Int,
         workingDirectory: String? = null,
         detectFilePaths: Boolean = true,
-        registry: HyperlinkRegistry = this.registry
+        registry: HyperlinkRegistry = this.registry,
+        deferFilePathExistenceChecks: Boolean = false
     ): List<Hyperlink> {
         if (text.isEmpty()) return emptyList()
 
@@ -368,7 +371,11 @@ object HyperlinkDetector {
                     // If pattern has pathValidator, use it (for file paths)
                     // pathValidator returns null if path doesn't exist, so skip the match
                     val url = if (pattern.pathValidator != null) {
-                        pattern.pathValidator.invoke(match.value, workingDirectory) ?: continue
+                        pattern.pathValidator.invoke(
+                            match.value,
+                            workingDirectory,
+                            deferFilePathExistenceChecks
+                        ) ?: continue
                     } else {
                         pattern.urlTransformer(match.value)
                     }
@@ -560,6 +567,7 @@ object HyperlinkDetector {
      * @param workingDirectory The current working directory for resolving relative paths (optional)
      * @param detectFilePaths Whether to detect file paths as hyperlinks (default: true)
      * @param registry The pattern registry to use (default: global registry)
+     * @param deferFilePathExistenceChecks When true, path existence checks are deferred asynchronously
      * @return List of hyperlinks that are part of this logical line
      */
     fun detectHyperlinksWithWrapping(
@@ -569,12 +577,20 @@ object HyperlinkDetector {
         terminalWidth: Int,
         workingDirectory: String? = null,
         detectFilePaths: Boolean = true,
-        registry: HyperlinkRegistry = this.registry
+        registry: HyperlinkRegistry = this.registry,
+        deferFilePathExistenceChecks: Boolean = false
     ): List<Hyperlink> {
         val lineInfo = collectWrappedLines(snapshot, screenRow, scrollOffset, terminalWidth)
 
         // Detect hyperlinks in the joined text (pass the registry)
-        val rawHyperlinks = detectHyperlinks(lineInfo.joinedText, lineInfo.startRow, workingDirectory, detectFilePaths, registry)
+        val rawHyperlinks = detectHyperlinks(
+            text = lineInfo.joinedText,
+            row = lineInfo.startRow,
+            workingDirectory = workingDirectory,
+            detectFilePaths = detectFilePaths,
+            registry = registry,
+            deferFilePathExistenceChecks = deferFilePathExistenceChecks
+        )
 
         // Convert flat positions to row-based spans
         return rawHyperlinks.map { hyperlink ->

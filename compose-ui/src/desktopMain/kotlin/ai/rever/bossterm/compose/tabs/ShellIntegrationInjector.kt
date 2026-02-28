@@ -48,6 +48,10 @@ object ShellIntegrationInjector {
             LOG.debug("Shell integration disabled, skipping injection")
             return
         }
+        if (isShellIntegrationSafeModeEnabled()) {
+            LOG.info("Shell integration safe mode enabled; skipping integration injection")
+            return
+        }
 
         val shellName = File(shell).name
 
@@ -129,6 +133,18 @@ object ShellIntegrationInjector {
         env["BOSSTERM_INJECT_INTEGRATION"] = "1"
 
         LOG.debug("Injected Fish integration via XDG_DATA_DIRS")
+    }
+
+    private fun isShellIntegrationSafeModeEnabled(): Boolean {
+        val prop = System.getProperty("bossterm.shellIntegration.safeMode")
+        if (!prop.isNullOrBlank()) {
+            return prop == "1" || prop.equals("true", ignoreCase = true)
+        }
+        val envValue = System.getenv("BOSSTERM_SHELL_INTEGRATION_SAFE_MODE")
+        if (!envValue.isNullOrBlank()) {
+            return envValue == "1" || envValue.equals("true", ignoreCase = true)
+        }
+        return false
     }
 
     /**

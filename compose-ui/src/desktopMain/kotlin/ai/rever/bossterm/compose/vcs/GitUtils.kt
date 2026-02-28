@@ -1,9 +1,9 @@
 package ai.rever.bossterm.compose.vcs
 
 import ai.rever.bossterm.compose.util.ShellEscaper
-import java.io.File
+import ai.rever.bossterm.compose.util.PerformanceCounters
+import ai.rever.bossterm.compose.util.SubprocessHelper
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 
 /**
  * Shared utility functions for Git and GitHub CLI operations.
@@ -27,6 +27,7 @@ object GitUtils {
         val now = System.currentTimeMillis()
         val cached = cache[key] ?: return null
         return if (now - cached.checkedAtMs <= STATUS_CACHE_TTL_MS) {
+            PerformanceCounters.increment("git_status_cache_hit")
             cached.value
         } else {
             null
@@ -38,6 +39,7 @@ object GitUtils {
         key: String,
         value: T
     ): T {
+        PerformanceCounters.increment("git_status_cache_write")
         cache[key] = CacheEntry(value = value, checkedAtMs = System.currentTimeMillis())
         return value
     }
@@ -49,25 +51,10 @@ object GitUtils {
         if (cwd == null) return false
         val key = cacheKey(cwd)
         readCached(gitRepoCache, key)?.let { return it }
-        var process: Process? = null
-        val result = try {
-            process = ProcessBuilder("git", "-C", cwd, "rev-parse", "--git-dir")
-                .redirectErrorStream(true)
-                .start()
-            val completed = process.waitFor(2, TimeUnit.SECONDS)
-            if (!completed) {
-                process.destroyForcibly()
-                false
-            } else {
-                process.exitValue() == 0
-            }
-        } catch (e: Exception) {
-            false
-        } finally {
-            process?.inputStream?.close()
-            process?.errorStream?.close()
-            process?.outputStream?.close()
-        }
+        PerformanceCounters.increment("git_status_cache_miss")
+        val result = SubprocessHelper
+            .run("git", "-C", cwd, "rev-parse", "--git-dir", timeoutMs = 2_000L)
+            .success
         return writeCached(gitRepoCache, key, result)
     }
 
@@ -80,26 +67,17 @@ object GitUtils {
         if (cwd == null) return false
         val key = cacheKey(cwd)
         readCached(ghRepoConfiguredCache, key)?.let { return it }
-        var process: Process? = null
-        val result = try {
-            process = ProcessBuilder("git", "-C", cwd, "config", "--get", "remote.origin.gh-resolved")
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-            val completed = process.waitFor(2, TimeUnit.SECONDS)
-            if (!completed) {
-                process.destroyForcibly()
-                false
-            } else {
-                process.exitValue() == 0 && output.isNotEmpty()
-            }
-        } catch (e: Exception) {
-            false
-        } finally {
-            process?.inputStream?.close()
-            process?.errorStream?.close()
-            process?.outputStream?.close()
-        }
+        PerformanceCounters.increment("git_status_cache_miss")
+        val commandResult = SubprocessHelper.run(
+            "git",
+            "-C",
+            cwd,
+            "config",
+            "--get",
+            "remote.origin.gh-resolved",
+            timeoutMs = 2_000L
+        )
+        val result = commandResult.success && commandResult.stdout.isNotEmpty()
         return writeCached(ghRepoConfiguredCache, key, result)
     }
 
@@ -110,25 +88,21 @@ object GitUtils {
         if (cwd == null) return null
         val key = cacheKey(cwd)
         readCached(currentBranchCache, key)?.let { return it }
-        var process: Process? = null
-        val result = try {
-            process = ProcessBuilder("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-            val completed = process.waitFor(2, TimeUnit.SECONDS)
-            if (!completed) {
-                process.destroyForcibly()
-                null
-            } else if (process.exitValue() == 0 && output.isNotEmpty() && output != "HEAD") {
-                output
-            } else null
-        } catch (e: Exception) {
+        PerformanceCounters.increment("git_status_cache_miss")
+        val commandResult = SubprocessHelper.run(
+            "git",
+            "-C",
+            cwd,
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+            timeoutMs = 2_000L
+        )
+        val output = commandResult.stdout
+        val result = if (commandResult.success && output.isNotEmpty() && output != "HEAD") {
+            output
+        } else {
             null
-        } finally {
-            process?.inputStream?.close()
-            process?.errorStream?.close()
-            process?.outputStream?.close()
         }
         return writeCached(currentBranchCache, key, result)
     }
@@ -140,27 +114,21 @@ object GitUtils {
         if (cwd == null) return emptyList()
         val key = cacheKey(cwd)
         readCached(localBranchesCache, key)?.let { return it }
-        var process: Process? = null
-        val result = try {
-            process = ProcessBuilder("git", "-C", cwd, "branch", "--format=%(refname:short)")
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-            val completed = process.waitFor(2, TimeUnit.SECONDS)
-            if (!completed) {
-                process.destroyForcibly()
-                emptyList()
-            } else if (process.exitValue() == 0) {
-                output.lines()
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-            } else emptyList()
-        } catch (e: Exception) {
+        PerformanceCounters.increment("git_status_cache_miss")
+        val commandResult = SubprocessHelper.run(
+            "git",
+            "-C",
+            cwd,
+            "branch",
+            "--format=%(refname:short)",
+            timeoutMs = 2_000L
+        )
+        val result = if (commandResult.success) {
+            commandResult.stdout.lines()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        } else {
             emptyList()
-        } finally {
-            process?.inputStream?.close()
-            process?.errorStream?.close()
-            process?.outputStream?.close()
         }
         return writeCached(localBranchesCache, key, result)
     }
@@ -193,6 +161,18 @@ object GitUtils {
         } else {
             "gh $cmd\n"
         }
+    }
+
+    fun cacheStats(): Map<String, Long> {
+        return mapOf(
+            "git_repo_entries" to gitRepoCache.size.toLong(),
+            "gh_repo_entries" to ghRepoConfiguredCache.size.toLong(),
+            "branch_entries" to currentBranchCache.size.toLong(),
+            "branches_entries" to localBranchesCache.size.toLong(),
+            "hits" to PerformanceCounters.get("git_status_cache_hit"),
+            "misses" to PerformanceCounters.get("git_status_cache_miss"),
+            "writes" to PerformanceCounters.get("git_status_cache_write")
+        )
     }
 
     // === Common Git Command Strings ===

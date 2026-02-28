@@ -6,9 +6,9 @@ import ai.rever.bossterm.compose.ContextMenuSection
 import ai.rever.bossterm.compose.ContextMenuSubmenu
 import ai.rever.bossterm.compose.ai.ToolCommandProvider
 import ai.rever.bossterm.compose.util.UrlOpener
+import ai.rever.bossterm.compose.util.SubprocessHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.concurrent.TimeUnit
 
 /**
  * Provides context menu items for version control operations (Git and GitHub CLI).
@@ -18,6 +18,9 @@ import java.util.concurrent.TimeUnit
  * - If not installed: Shows install option with link to download
  */
 class VersionControlMenuProvider {
+    private var lastRefreshAtMs: Long = 0L
+    private var lastRefreshCwd: String? = null
+    private val refreshIntervalMs: Long = 2_000L
 
     /**
      * Cached installation status to avoid repeated `which` calls.
@@ -53,15 +56,7 @@ class VersionControlMenuProvider {
      * Detect if a command is installed by checking `which`.
      */
     private fun isCommandInstalled(command: String): Boolean {
-        return try {
-            val process = ProcessBuilder("which", command)
-                .redirectErrorStream(true)
-                .start()
-            val completed = process.waitFor(2, TimeUnit.SECONDS)
-            completed && process.exitValue() == 0
-        } catch (e: Exception) {
-            false
-        }
+        return SubprocessHelper.commandExists(command, timeoutMs = 2_000L)
     }
 
     /**
@@ -70,6 +65,13 @@ class VersionControlMenuProvider {
      * @param cwd Current working directory for git operations
      */
     suspend fun refreshStatus(cwd: String? = null) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (lastRefreshCwd == cwd && now - lastRefreshAtMs < refreshIntervalMs) {
+            return@withContext
+        }
+        lastRefreshAtMs = now
+        lastRefreshCwd = cwd
+
         workingDirectory = cwd
         gitInstalled = isCommandInstalled("git")
         ghInstalled = isCommandInstalled("gh")

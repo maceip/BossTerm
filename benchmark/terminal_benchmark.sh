@@ -7,7 +7,7 @@
 #
 # Options:
 #   -t, --terminal <name>    Terminal to benchmark (bossterm, iterm2, terminal, alacritty, all)
-#   -b, --benchmarks <list>  Comma-separated list of benchmarks to run (throughput,latency,unicode,memory,startup)
+#   -b, --benchmarks <list>  Comma-separated list of benchmarks to run (throughput,latency,unicode,memory,startup,scrollback,ansi,filepaths)
 #   -o, --output <dir>       Output directory for results (default: ./benchmark_results)
 #   -r, --runs <n>           Number of runs per benchmark (default: 3)
 #   -v, --verbose            Verbose output
@@ -24,7 +24,7 @@ OUTPUT_DIR="${SCRIPT_DIR}/benchmark_results"
 RUNS=3
 VERBOSE=false
 TERMINALS=()
-BENCHMARKS=("throughput" "latency" "unicode" "memory" "startup" "scrollback")
+BENCHMARKS=("throughput" "latency" "unicode" "memory" "startup" "scrollback" "filepaths")
 
 # Colors for output
 RED='\033[0;31m'
@@ -106,8 +106,18 @@ generate_throughput_data() {
     local size=$1  # in MB
     local bytes=$((size * 1024 * 1024))
 
-    # Generate random printable ASCII data
-    head -c "$bytes" /dev/urandom | base64 | head -c "$bytes"
+    # Generate random printable ASCII data without triggering pipefail/SIGPIPE.
+    python3 - "$bytes" << 'PYTHON_EOF'
+import base64
+import os
+import sys
+
+target = int(sys.argv[1])
+data = bytearray()
+while len(data) < target:
+    data.extend(base64.b64encode(os.urandom(8192)))
+sys.stdout.buffer.write(bytes(data[:target]))
+PYTHON_EOF
 }
 
 generate_line_data() {
@@ -178,6 +188,15 @@ generate_ansi_stress_data() {
         fi
     done
     echo -e "\033[0m"
+}
+
+generate_file_path_heavy_data() {
+    local lines=$1
+    local file=""
+    for ((i=1; i<=lines; i++)); do
+        printf '/workspace/project/module_%04d/src/main/kotlin/com/example/path/VeryLongFileName_%04d.kt:%d:%d - https://example.com/docs/%04d?query=path_%04d\n' \
+            "$((i % 150))" "$i" "$((i % 400 + 1))" "$((i % 180 + 1))" "$i" "$i"
+    done
 }
 
 # === Benchmark Functions ===
@@ -593,7 +612,7 @@ benchmark_scrollback() {
             local start_time
             start_time=$(python3 -c 'import time; print(time.time())')
 
-            cat "$data_file"
+            cat "$data_file" > /dev/null
 
             local end_time
             end_time=$(python3 -c 'import time; print(time.time())')
@@ -658,6 +677,51 @@ benchmark_ansi() {
     done
 }
 
+benchmark_filepaths() {
+    local terminal=$1
+    local results_file=$2
+
+    log "Running file-path-heavy output benchmark for $terminal..."
+
+    {
+        echo ""
+        echo "=== File Path Heavy Output Benchmark ==="
+        echo "Terminal: $terminal"
+        echo "Date: $(date)"
+        echo ""
+    } >> "$results_file"
+
+    local line_counts=(5000 20000 50000)
+
+    for lines in "${line_counts[@]}"; do
+        verbose "Testing path-heavy output with ${lines} lines..."
+
+        local data_file="/tmp/bench_paths_${lines}.txt"
+        if [[ ! -f "$data_file" ]]; then
+            generate_file_path_heavy_data "$lines" > "$data_file"
+        fi
+
+        local total_time=0
+        for ((run=1; run<=RUNS; run++)); do
+            local start_time
+            start_time=$(python3 -c 'import time; print(time.time())')
+
+            cat "$data_file"
+
+            local end_time
+            end_time=$(python3 -c 'import time; print(time.time())')
+
+            local elapsed
+            elapsed=$(python3 -c "print(${end_time} - ${start_time})")
+            total_time=$(python3 -c "print(${total_time} + ${elapsed})")
+        done
+
+        local avg_time
+        avg_time=$(python3 -c "print(round(${total_time} / ${RUNS}, 3))")
+        echo "${lines} path lines: ${avg_time}s" >> "$results_file"
+    done
+}
+
 # === Main Execution ===
 
 run_benchmarks() {
@@ -707,6 +771,9 @@ run_benchmarks() {
             ansi)
                 benchmark_ansi "$terminal" "$results_file"
                 ;;
+            filepaths)
+                benchmark_filepaths "$terminal" "$results_file"
+                ;;
             *)
                 log_warn "Unknown benchmark: $bench"
                 ;;
@@ -747,7 +814,7 @@ compare_results() {
             local results_dir="$OUTPUT_DIR/$terminal"
             if [[ -d "$results_dir" ]]; then
                 local latest_result
-                latest_result=$(ls -t "$results_dir"/benchmark_*.txt 2>/dev/null | head -1)
+                latest_result=$(find "$results_dir" -name "benchmark_*.txt" -print | sort | tail -1)
                 if [[ -n "$latest_result" ]]; then
                     echo "### $terminal"
                     echo ""

@@ -27,8 +27,7 @@ import ai.rever.bossterm.compose.settings.components.SettingsSection
 import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
 import ai.rever.bossterm.compose.update.Version
 import ai.rever.bossterm.compose.update.VersionManagementSection
-import java.awt.Desktop
-import java.net.URI
+import ai.rever.bossterm.compose.util.UrlOpener
 
 /**
  * About section: application info, system info, links, shortcuts, license, acknowledgments.
@@ -183,10 +182,8 @@ private fun LinkRow(
             .background(SurfaceColor)
             .hoverable(interactionSource)
             .clickable {
-                try {
-                    Desktop.getDesktop().browse(URI(url))
-                } catch (e: Exception) {
-                    System.err.println("Failed to open URL '$url': ${e.message}")
+                if (!UrlOpener.open(url)) {
+                    System.err.println("Failed to open URL '$url'")
                 }
             }
             .padding(horizontal = 12.dp, vertical = 10.dp),

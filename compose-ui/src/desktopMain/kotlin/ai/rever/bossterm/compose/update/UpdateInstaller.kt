@@ -1,7 +1,9 @@
 package ai.rever.bossterm.compose.update
 
 import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
+import ai.rever.bossterm.compose.util.AuditLogger
 import ai.rever.bossterm.compose.util.LogRedactor
+import ai.rever.bossterm.compose.util.SubprocessHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -117,25 +119,35 @@ object UpdateInstaller {
      * Install update for the current platform.
      */
     suspend fun installUpdate(downloadPath: String): InstallResult {
+        AuditLogger.log("update_install", "started", mapOf("path" to LogRedactor.redactPath(downloadPath)))
         return try {
             val downloadFile = File(downloadPath)
             if (!downloadFile.exists()) {
+                AuditLogger.log("update_install", "failed", mapOf("reason" to "missing_file"))
                 return InstallResult.Error("Update file not found")
             }
 
             if (!verifyNoDowngrade(downloadFile)) {
+                AuditLogger.log("update_install", "failed", mapOf("reason" to "downgrade_blocked"))
                 return InstallResult.Error("Cannot install older version")
             }
 
-            when (getCurrentPlatform()) {
+            val result = when (getCurrentPlatform()) {
                 "macOS" -> installMacOSUpdate(downloadFile)
                 "Windows" -> installWindowsUpdate(downloadFile)
                 "Linux-deb" -> installLinuxDebUpdate(downloadFile)
                 "Linux-rpm" -> installLinuxRpmUpdate(downloadFile)
                 else -> installJarUpdate(downloadFile)
             }
+            when (result) {
+                is InstallResult.Success -> AuditLogger.log("update_install", "success")
+                is InstallResult.RequiresRestart -> AuditLogger.log("update_install", "requires_restart")
+                is InstallResult.Error -> AuditLogger.log("update_install", "failed", mapOf("error" to result.message))
+            }
+            result
         } catch (e: Exception) {
             println("Error installing update: ${e.message}")
+            AuditLogger.log("update_install", "failed", mapOf("error" to (e.message ?: "unknown")))
             InstallResult.Error(e.message ?: "Unknown error")
         }
     }
@@ -266,13 +278,8 @@ object UpdateInstaller {
         println("✅ DISPLAY is set: $display")
 
         // Check if pkexec or sudo is available
-        val hasPkexec = try {
-            ProcessBuilder("which", "pkexec").start().waitFor() == 0
-        } catch (e: Exception) { false }
-
-        val hasSudo = try {
-            ProcessBuilder("which", "sudo").start().waitFor() == 0
-        } catch (e: Exception) { false }
+        val hasPkexec = SubprocessHelper.commandExists("pkexec", timeoutMs = 2_000L)
+        val hasSudo = SubprocessHelper.commandExists("sudo", timeoutMs = 2_000L)
 
         if (!hasPkexec && !hasSudo) {
             println("❌ ERROR: Neither pkexec nor sudo available")

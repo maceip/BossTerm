@@ -5,6 +5,8 @@ import ai.rever.bossterm.compose.util.UrlOpener
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Desktop platform services implementation.
@@ -60,26 +62,32 @@ class DesktopClipboardService : PlatformServices.ClipboardService {
 
 class DesktopFileSystemService : PlatformServices.FileSystemService {
     override suspend fun fileExists(path: String): Boolean {
-        // TODO: Track 6 - Implement file operations
-        return java.io.File(path).exists()
+        return withContext(Dispatchers.IO) {
+            java.io.File(path).exists()
+        }
     }
 
     override suspend fun readTextFile(path: String): String? {
-        // TODO: Track 6 - Implement file reading
-        return try {
-            java.io.File(path).readText()
-        } catch (e: Exception) {
-            null
+        return withContext(Dispatchers.IO) {
+            try {
+                java.io.File(path).readText()
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
     override suspend fun writeTextFile(path: String, content: String): Boolean {
-        // TODO: Track 6 - Implement file writing
-        return try {
-            java.io.File(path).writeText(content)
-            true
-        } catch (e: Exception) {
-            false
+        return withContext(Dispatchers.IO) {
+            try {
+                ai.rever.bossterm.compose.util.AtomicFileWriter.writeTextAtomic(
+                    file = java.io.File(path),
+                    content = content
+                )
+                true
+            } catch (e: Exception) {
+                false
+            }
         }
     }
 
@@ -90,21 +98,23 @@ class DesktopFileSystemService : PlatformServices.FileSystemService {
 
 class DesktopProcessService : PlatformServices.ProcessService {
     override suspend fun spawnProcess(config: PlatformServices.ProcessService.ProcessConfig): PlatformServices.ProcessService.ProcessHandle? {
-        return try {
-            val command = arrayOf(config.command) + config.arguments.toTypedArray()
-            val isWindows = ShellCustomizationUtils.isWindows()
-            val pty = com.pty4j.PtyProcessBuilder()
-                .setCommand(command)
-                .setEnvironment(config.environment)
-                .setDirectory(config.workingDirectory ?: System.getProperty("user.home"))
-                .setConsole(false)  // Don't attach to parent console
-                .setWindowsAnsiColorEnabled(isWindows)  // Enable ANSI colors on Windows
-                .setUseWinConPty(isWindows)  // Use Windows ConPTY for better compatibility
-                .start()
-            PtyProcessHandle(pty)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
+        return withContext(Dispatchers.IO) {
+            try {
+                val command = arrayOf(config.command) + config.arguments.toTypedArray()
+                val isWindows = ShellCustomizationUtils.isWindows()
+                val pty = com.pty4j.PtyProcessBuilder()
+                    .setCommand(command)
+                    .setEnvironment(config.environment)
+                    .setDirectory(config.workingDirectory ?: System.getProperty("user.home"))
+                    .setConsole(false)  // Don't attach to parent console
+                    .setWindowsAnsiColorEnabled(isWindows)  // Enable ANSI colors on Windows
+                    .setUseWinConPty(isWindows)  // Use Windows ConPTY for better compatibility
+                    .start()
+                PtyProcessHandle(pty)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            }
         }
     }
 
@@ -126,61 +136,67 @@ class DesktopProcessService : PlatformServices.ProcessService {
         private val isShuttingDown = java.util.concurrent.atomic.AtomicBoolean(false)
 
         override suspend fun write(data: String) {
-            outputStream.write(data.toByteArray())
-            outputStream.flush()
+            withContext(Dispatchers.IO) {
+                outputStream.write(data.toByteArray())
+                outputStream.flush()
+            }
         }
 
         override suspend fun writeBytes(data: ByteArray) {
-            outputStream.write(data)
-            outputStream.flush()
+            withContext(Dispatchers.IO) {
+                outputStream.write(data)
+                outputStream.flush()
+            }
         }
 
         override suspend fun read(): String? {
-            // Early exit if shutting down
-            if (isShuttingDown.get()) return null
+            return withContext(Dispatchers.IO) {
+                // Early exit if shutting down
+                if (isShuttingDown.get()) return@withContext null
 
-            return try {
-                val buffer = ByteArray(8192)
-                val len = inputStream.read(buffer)
-                if (len <= 0) return null
+                try {
+                    val buffer = ByteArray(8192)
+                    val len = inputStream.read(buffer)
+                    if (len <= 0) return@withContext null
 
-                // Combine any buffered incomplete UTF-8 bytes with new data
-                val allBytes = if (incompleteUtf8Buffer.isNotEmpty()) {
-                    val combined = ByteArray(incompleteUtf8Buffer.size + len)
-                    incompleteUtf8Buffer.forEachIndexed { index, byte -> combined[index] = byte }
-                    System.arraycopy(buffer, 0, combined, incompleteUtf8Buffer.size, len)
-                    incompleteUtf8Buffer.clear()
-                    combined
-                } else {
-                    buffer.copyOf(len)
-                }
-
-                // Check if data ends with incomplete UTF-8 sequence
-                val lastCompleteByteIndex = findLastCompleteUtf8Boundary(allBytes)
-
-                if (lastCompleteByteIndex < allBytes.size) {
-                    // Buffer incomplete bytes for next read
-                    for (i in lastCompleteByteIndex until allBytes.size) {
-                        incompleteUtf8Buffer.add(allBytes[i])
+                    // Combine any buffered incomplete UTF-8 bytes with new data
+                    val allBytes = if (incompleteUtf8Buffer.isNotEmpty()) {
+                        val combined = ByteArray(incompleteUtf8Buffer.size + len)
+                        incompleteUtf8Buffer.forEachIndexed { index, byte -> combined[index] = byte }
+                        System.arraycopy(buffer, 0, combined, incompleteUtf8Buffer.size, len)
+                        incompleteUtf8Buffer.clear()
+                        combined
+                    } else {
+                        buffer.copyOf(len)
                     }
 
-                    if (lastCompleteByteIndex == 0) {
-                        // Entire buffer is incomplete - very rare, but possible
-                        return ""
-                    }
+                    // Check if data ends with incomplete UTF-8 sequence
+                    val lastCompleteByteIndex = findLastCompleteUtf8Boundary(allBytes)
 
-                    // Return only complete UTF-8 characters
-                    String(allBytes, 0, lastCompleteByteIndex, Charsets.UTF_8)
-                } else {
-                    // All bytes form complete UTF-8 characters
-                    String(allBytes, 0, allBytes.size, Charsets.UTF_8)
+                    if (lastCompleteByteIndex < allBytes.size) {
+                        // Buffer incomplete bytes for next read
+                        for (i in lastCompleteByteIndex until allBytes.size) {
+                            incompleteUtf8Buffer.add(allBytes[i])
+                        }
+
+                        if (lastCompleteByteIndex == 0) {
+                            // Entire buffer is incomplete - very rare, but possible
+                            return@withContext ""
+                        }
+
+                        // Return only complete UTF-8 characters
+                        String(allBytes, 0, lastCompleteByteIndex, Charsets.UTF_8)
+                    } else {
+                        // All bytes form complete UTF-8 characters
+                        String(allBytes, 0, allBytes.size, Charsets.UTF_8)
+                    }
+                } catch (e: Exception) {
+                    // During shutdown, exceptions are expected - return null silently
+                    if (!isShuttingDown.get()) {
+                        println("WARN: Error reading from PTY: ${e.message}")
+                    }
+                    null
                 }
-            } catch (e: Exception) {
-                // During shutdown, exceptions are expected - return null silently
-                if (!isShuttingDown.get()) {
-                    println("WARN: Error reading from PTY: ${e.message}")
-                }
-                null
             }
         }
 
@@ -229,37 +245,50 @@ class DesktopProcessService : PlatformServices.ProcessService {
         override fun isAlive(): Boolean = process.isAlive
 
         override suspend fun kill() {
-            // Signal shutdown to prevent race conditions with read()
-            isShuttingDown.set(true)
+            withContext(Dispatchers.IO) {
+                // Signal shutdown to prevent race conditions with read()
+                isShuttingDown.set(true)
 
-            try {
-                // Close streams first to signal EOF to the process
-                try { outputStream.close() } catch (_: Exception) {}
-                try { inputStream.close() } catch (_: Exception) {}
+                try {
+                    // Close streams first to signal EOF to the process
+                    try {
+                        outputStream.close()
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        inputStream.close()
+                    } catch (_: Exception) {
+                    }
 
-                // Destroy the process
-                process.destroy()
+                    // Destroy the process
+                    process.destroy()
 
-                // Wait briefly for graceful termination (up to 2 seconds)
-                // waitFor() has built-in timeout, no need for coroutine timeout wrapper
-                val exited = process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
+                    // Wait briefly for graceful termination (up to 2 seconds)
+                    // waitFor() has built-in timeout, no need for coroutine timeout wrapper
+                    val exited = process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
 
-                // Force kill if still running
-                if (!exited && process.isAlive) {
-                    process.destroyForcibly()
+                    // Force kill if still running
+                    if (!exited && process.isAlive) {
+                        process.destroyForcibly()
+                    }
+                } catch (e: Exception) {
+                    // Last resort - force kill
+                    try {
+                        process.destroyForcibly()
+                    } catch (_: Exception) {
+                    }
                 }
-            } catch (e: Exception) {
-                // Last resort - force kill
-                try { process.destroyForcibly() } catch (_: Exception) {}
             }
         }
 
-        override suspend fun waitFor(): Int = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        override suspend fun waitFor(): Int = withContext(Dispatchers.IO) {
             process.waitFor()
         }
 
         override suspend fun resize(columns: Int, rows: Int) {
-            process.setWinSize(com.pty4j.WinSize(columns, rows))
+            withContext(Dispatchers.IO) {
+                process.setWinSize(com.pty4j.WinSize(columns, rows))
+            }
         }
 
         override fun getExitCode(): Int? = if (process.isAlive) null else process.exitValue()

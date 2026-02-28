@@ -3,7 +3,9 @@ package ai.rever.bossterm.compose.update
 import ai.rever.bossterm.compose.shell.ShellCustomizationUtils
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 
 /**
  * Generates platform-specific update helper scripts.
@@ -568,6 +570,8 @@ ASKPASS_EOF
      */
     fun launchScript(scriptFile: File) {
         try {
+            validateScriptFileSecurity(scriptFile)
+
             val logDir = File("/tmp/bossterm-updater")
             logDir.mkdirs()
             val timestamp = System.currentTimeMillis()
@@ -613,6 +617,47 @@ ASKPASS_EOF
         }
     }
 
+    private fun validateScriptFileSecurity(scriptFile: File) {
+        if (!scriptFile.exists()) {
+            throw SecurityException("Update script does not exist: ${scriptFile.absolutePath}")
+        }
+        if (!scriptFile.isFile) {
+            throw SecurityException("Update script is not a regular file: ${scriptFile.absolutePath}")
+        }
+
+        val canonicalPath = scriptFile.canonicalFile.toPath()
+        val expectedRoot = File(System.getProperty("java.io.tmpdir"), "bossterm-updater")
+            .canonicalFile
+            .toPath()
+        if (!canonicalPath.startsWith(expectedRoot)) {
+            throw SecurityException("Update script path is outside expected update directory")
+        }
+
+        if (Files.isSymbolicLink(scriptFile.toPath())) {
+            throw SecurityException("Refusing to execute symlinked update script")
+        }
+
+        try {
+            val owner = Files.getOwner(scriptFile.toPath(), LinkOption.NOFOLLOW_LINKS)
+            val currentUser = System.getProperty("user.name")
+            if (!owner.name.endsWith(currentUser)) {
+                throw SecurityException("Update script owner mismatch: ${owner.name}")
+            }
+        } catch (_: UnsupportedOperationException) {
+            // Ignore on filesystems that do not support ownership checks.
+        }
+
+        try {
+            val perms = Files.getPosixFilePermissions(scriptFile.toPath(), LinkOption.NOFOLLOW_LINKS)
+            val expected = PosixFilePermissions.fromString("rwx------")
+            if (perms != expected) {
+                throw SecurityException("Unexpected script permissions: $perms")
+            }
+        } catch (_: UnsupportedOperationException) {
+            // Ignore on non-POSIX filesystems.
+        }
+    }
+
     /**
      * Make a file executable (Unix-like systems).
      */
@@ -623,11 +668,6 @@ ASKPASS_EOF
             permissions.add(PosixFilePermission.OWNER_READ)
             permissions.add(PosixFilePermission.OWNER_WRITE)
             permissions.add(PosixFilePermission.OWNER_EXECUTE)
-            permissions.add(PosixFilePermission.GROUP_READ)
-            permissions.add(PosixFilePermission.GROUP_EXECUTE)
-            permissions.add(PosixFilePermission.OTHERS_READ)
-            permissions.add(PosixFilePermission.OTHERS_EXECUTE)
-
             Files.setPosixFilePermissions(path, permissions)
         } catch (e: Exception) {
             // Not a POSIX system (Windows) - ignore

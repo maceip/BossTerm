@@ -1,5 +1,7 @@
 package ai.rever.bossterm.compose.shell
 
+import ai.rever.bossterm.compose.util.PerformanceCounters
+import ai.rever.bossterm.compose.util.SubprocessHelper
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -131,32 +133,23 @@ object ShellCustomizationUtils {
         val now = System.currentTimeMillis()
         commandCheckCache[cacheKey]?.let { cached ->
             if (now - cached.checkedAtMs <= COMMAND_CHECK_TTL_MS) {
+                PerformanceCounters.increment("command_probe_cache_hit")
                 return cached.installed
             }
         }
+        PerformanceCounters.increment("command_probe_cache_miss")
 
-        var process: Process? = null
-        val installed = try {
-            val checkCommand = if (isWindows()) "where" else "which"
-            process = ProcessBuilder(checkCommand, command)
-                .redirectErrorStream(true)
-                .start()
-            val completed = process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
-            if (!completed) {
-                process.destroyForcibly()
-                false
-            } else {
-                process.exitValue() == 0
-            }
-        } catch (e: Exception) {
-            false
-        } finally {
-            process?.inputStream?.close()
-            process?.errorStream?.close()
-            process?.outputStream?.close()
-        }
+        val installed = SubprocessHelper.commandExists(command, timeoutMs = 2_000L, windows = isWindows())
         commandCheckCache[cacheKey] = CommandCheckCacheEntry(installed = installed, checkedAtMs = now)
         return installed
+    }
+
+    fun commandProbeCacheStats(): Map<String, Long> {
+        return mapOf(
+            "entries" to commandCheckCache.size.toLong(),
+            "hits" to PerformanceCounters.get("command_probe_cache_hit"),
+            "misses" to PerformanceCounters.get("command_probe_cache_miss")
+        )
     }
 
     // ===== Uninstall Commands =====

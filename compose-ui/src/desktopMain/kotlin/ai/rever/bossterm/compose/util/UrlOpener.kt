@@ -5,8 +5,8 @@ import java.awt.Desktop
 import java.awt.GraphicsEnvironment
 import java.net.URI
 import javax.swing.JOptionPane
+import java.io.File
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -19,7 +19,8 @@ object UrlOpener {
     data class UrlOpenPolicy(
         val allowedSchemes: Set<String> = DEFAULT_ALLOWED_SCHEMES,
         val allowFileUrls: Boolean = true,
-        val promptBeforeFileUrlOpen: Boolean = true
+        val promptBeforeFileUrlOpen: Boolean = true,
+        val promptBeforeExecutableFileOpen: Boolean = true
     )
 
     @Volatile
@@ -66,11 +67,17 @@ object UrlOpener {
         val normalizedUri = normalizeAndValidate(url) ?: return false
         if (!confirmFileUrlOpenIfRequired(normalizedUri)) {
             blockedOpenCount.incrementAndGet()
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "file_prompt_declined", "url" to normalizedUri.toString()))
+            return false
+        }
+        if (!confirmExecutableOpenIfRequired(normalizedUri)) {
+            blockedOpenCount.incrementAndGet()
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "executable_prompt_declined", "url" to normalizedUri.toString()))
             return false
         }
 
         return try {
-            when {
+            val opened = when {
                 ShellCustomizationUtils.isLinux() -> openOnLinux(normalizedUri)
                 ShellCustomizationUtils.isMacOS() -> {
                     ProcessBuilder("open", normalizedUri.toString()).start()
@@ -82,8 +89,19 @@ object UrlOpener {
                 }
                 else -> openWithDesktop(normalizedUri)
             }
+            AuditLogger.log(
+                "open_url",
+                if (opened) "success" else "failed",
+                mapOf("url" to normalizedUri.toString(), "scheme" to (normalizedUri.scheme ?: "unknown"))
+            )
+            opened
         } catch (e: Exception) {
             println("Failed to open URL: ${normalizedUri} - ${e.message}")
+            AuditLogger.log(
+                "open_url",
+                "failed",
+                mapOf("url" to normalizedUri.toString(), "scheme" to (normalizedUri.scheme ?: "unknown"), "error" to (e.message ?: "unknown"))
+            )
             false
         }
     }
@@ -94,10 +112,20 @@ object UrlOpener {
 
     fun blockedRequestCount(): Long = blockedOpenCount.get()
 
+    fun cacheStats(): Map<String, Long> {
+        return mapOf(
+            "entries" to commandAvailabilityCache.size.toLong(),
+            "hits" to PerformanceCounters.get("url_command_cache_hit"),
+            "misses" to PerformanceCounters.get("url_command_cache_miss"),
+            "blocked" to blockedOpenCount.get()
+        )
+    }
+
     private fun normalizeAndValidate(url: String): URI? {
         val trimmed = url.trim()
         if (trimmed.isEmpty()) {
             blockedOpenCount.incrementAndGet()
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "empty_url"))
             return null
         }
 
@@ -106,6 +134,7 @@ object UrlOpener {
         } catch (e: Exception) {
             println("Blocked malformed URL: $trimmed (${e.message})")
             blockedOpenCount.incrementAndGet()
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "malformed_url", "url" to trimmed))
             return null
         }
 
@@ -113,6 +142,7 @@ object UrlOpener {
         if (scheme.isNullOrBlank()) {
             println("Blocked URL without scheme: $trimmed")
             blockedOpenCount.incrementAndGet()
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "missing_scheme", "url" to trimmed))
             return null
         }
 
@@ -122,6 +152,7 @@ object UrlOpener {
         if (!allowedByScheme || !allowedFileUrl) {
             println("Blocked URL scheme '$scheme': $trimmed")
             blockedOpenCount.incrementAndGet()
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "scheme_not_allowed", "scheme" to scheme, "url" to trimmed))
             return null
         }
 
@@ -136,6 +167,7 @@ object UrlOpener {
 
         if (GraphicsEnvironment.isHeadless()) {
             println("Blocked file URL in headless mode: $uri")
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "headless_file_url", "url" to uri.toString()))
             return false
         }
 
@@ -143,6 +175,38 @@ object UrlOpener {
             null,
             "Open local file?\n$uri",
             "Confirm Local File Access",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.WARNING_MESSAGE
+        )
+        return answer == JOptionPane.OK_OPTION
+    }
+
+    private fun confirmExecutableOpenIfRequired(uri: URI): Boolean {
+        val policy = openPolicy
+        if (!uri.scheme.equals("file", ignoreCase = true) || !policy.promptBeforeExecutableFileOpen) {
+            return true
+        }
+
+        val localFile = try {
+            File(uri)
+        } catch (_: Exception) {
+            return false
+        }
+
+        if (!localFile.isFile || !localFile.canExecute()) {
+            return true
+        }
+
+        if (GraphicsEnvironment.isHeadless()) {
+            println("Blocked executable file URL in headless mode: $uri")
+            AuditLogger.log("open_url", "blocked", mapOf("reason" to "headless_executable_url", "url" to uri.toString()))
+            return false
+        }
+
+        val answer = JOptionPane.showConfirmDialog(
+            null,
+            "Open executable file?\n${localFile.absolutePath}",
+            "Confirm Executable Launch",
             JOptionPane.OK_CANCEL_OPTION,
             JOptionPane.WARNING_MESSAGE
         )
@@ -193,19 +257,13 @@ object UrlOpener {
         synchronized(cacheLock) {
             val cached = commandAvailabilityCache[command]
             if (cached != null && now - cached.first <= COMMAND_CACHE_TTL_MS) {
+                PerformanceCounters.increment("url_command_cache_hit")
                 return cached.second
             }
         }
+        PerformanceCounters.increment("url_command_cache_miss")
 
-        val exists = try {
-            val whichProcess = ProcessBuilder("which", command)
-                .redirectErrorStream(true)
-                .start()
-            val completed = whichProcess.waitFor(2, TimeUnit.SECONDS)
-            completed && whichProcess.exitValue() == 0
-        } catch (_: Exception) {
-            false
-        }
+        val exists = SubprocessHelper.commandExists(command, timeoutMs = 2_000L, windows = false)
 
         synchronized(cacheLock) {
             commandAvailabilityCache[command] = now to exists

@@ -1,0 +1,41 @@
+name: Performance Budget
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  benchmark-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Run benchmark suite
+        run: |
+          chmod +x benchmark/terminal_benchmark.sh
+          benchmark/terminal_benchmark.sh \
+            --terminal bossterm \
+            --benchmarks throughput,filepaths \
+            --runs 1 \
+            --output benchmark_results_ci
+
+      - name: Enforce benchmark budgets
+        run: |
+          latest_result="$(find benchmark_results_ci/bossterm -name 'benchmark_*.txt' -print | sort | tail -n1)"
+          python3 benchmark/check_benchmark_budget.py "$latest_result"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_results_ci/

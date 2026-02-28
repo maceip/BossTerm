@@ -1,6 +1,8 @@
 package ai.rever.bossterm.compose.update
 
 import ai.rever.bossterm.compose.util.LogRedactor
+import ai.rever.bossterm.compose.util.DebugLog
+import ai.rever.bossterm.compose.util.AuditLogger
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.cio.*
@@ -153,11 +155,18 @@ class DesktopUpdateService {
             }
 
             if (downloadFile.exists() && downloadFile.length() > 0) {
+                AuditLogger.log(
+                    "update_download",
+                    "success",
+                    mapOf("asset" to asset.name, "path" to LogRedactor.redactPath(downloadFile.absolutePath))
+                )
                 Result.success(downloadFile.absolutePath)
             } else {
+                AuditLogger.log("update_download", "failed", mapOf("asset" to asset.name, "reason" to "empty_file"))
                 Result.failure(Exception("Download failed: file is empty"))
             }
         } catch (e: Exception) {
+            AuditLogger.log("update_download", "failed", mapOf("asset" to asset.name, "error" to (e.message ?: "unknown")))
             Result.failure(e)
         }
     }
@@ -168,9 +177,9 @@ class DesktopUpdateService {
     suspend fun checkForUpdates(): UpdateInfo {
         return try {
             if (GitHubConfig.hasToken) {
-                println("✅ Using authenticated GitHub API (5,000 requests/hour)")
+                DebugLog.info("✅ Using authenticated GitHub API (5,000 requests/hour)")
             } else {
-                println("⚠️ Using unauthenticated GitHub API (60 requests/hour)")
+                DebugLog.info("⚠️ Using unauthenticated GitHub API (60 requests/hour)")
             }
 
             val response = apiClient.get(RELEASES_ENDPOINT) {
@@ -227,8 +236,8 @@ class DesktopUpdateService {
             val isUpdateAvailable = latestVersion.isNewerThan(Version.CURRENT)
 
             val expectedAssetName = getExpectedAssetName(latestVersion)
-            println("Looking for asset: $expectedAssetName")
-            println("Available assets: ${latestRelease.assets.map { it.name }}")
+            DebugLog.info("Looking for asset: $expectedAssetName")
+            DebugLog.info("Available assets: ${latestRelease.assets.map { it.name }}")
 
             val asset = latestRelease.assets.find {
                 it.name.equals(expectedAssetName, ignoreCase = true)
@@ -323,12 +332,19 @@ class DesktopUpdateService {
 
             if (downloadFile.exists() && downloadFile.length() > 0) {
                 println("Update downloaded successfully: ${LogRedactor.redactPath(downloadFile.absolutePath)}")
+                AuditLogger.log(
+                    "update_download",
+                    "success",
+                    mapOf("asset" to updateInfo.assetName, "path" to LogRedactor.redactPath(downloadFile.absolutePath))
+                )
                 downloadFile.absolutePath
             } else {
+                AuditLogger.log("update_download", "failed", mapOf("asset" to updateInfo.assetName, "reason" to "empty_file"))
                 null
             }
         } catch (e: Exception) {
             println("Error downloading update: ${e.message}")
+            AuditLogger.log("update_download", "failed", mapOf("asset" to updateInfo.assetName, "error" to (e.message ?: "unknown")))
             null
         }
     }
@@ -408,6 +424,7 @@ class DesktopUpdateService {
             val checksumManifestBytes = fetchBinaryResource(checksumManifestUrl)
             val checksumSignatureBytes = fetchBinaryResource(checksumSignatureUrl)
             if (!verifyManifestSignature(checksumManifestBytes, checksumSignatureBytes)) {
+                AuditLogger.log("update_verify", "failed", mapOf("asset" to expectedAssetName, "reason" to "signature_invalid"))
                 return Result.failure(Exception("Detached signature verification failed for checksum manifest"))
             }
 
@@ -417,14 +434,17 @@ class DesktopUpdateService {
 
             val actualHash = sha256(downloadFile)
             if (!actualHash.equals(expectedHash, ignoreCase = true)) {
+                AuditLogger.log("update_verify", "failed", mapOf("asset" to expectedAssetName, "reason" to "sha256_mismatch"))
                 return Result.failure(
                     Exception("SHA-256 mismatch for ${downloadFile.name}: expected $expectedHash, got $actualHash")
                 )
             }
 
             println("✅ Integrity verified (${downloadFile.name}) via signed SHA-256 manifest")
+            AuditLogger.log("update_verify", "success", mapOf("asset" to expectedAssetName))
             Result.success(Unit)
         } catch (e: Exception) {
+            AuditLogger.log("update_verify", "failed", mapOf("asset" to expectedAssetName, "error" to (e.message ?: "unknown")))
             Result.failure(e)
         }
     }
