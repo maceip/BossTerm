@@ -12,5 +12,5 @@ enum class CursorShape {
     STEADY_VERTICAL_BAR;
 
     val isBlinking: Boolean
-        get() = this == CursorShape.BLINK_BLOCK || this == CursorShape.BLINK_UNDERLINE || this == CursorShape.BLINK_VERTICAL_BAR
+        get() = this == BLINK_BLOCK || this == BLINK_UNDERLINE || this == BLINK_VERTICAL_BAR
 }

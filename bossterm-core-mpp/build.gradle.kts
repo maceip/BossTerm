@@ -14,8 +14,15 @@ kotlin {
     jvm()
     androidTarget()
 
-    // Note: iOS, JS, and Wasm targets are not yet implemented
-    // They can be added when actual source implementations exist
+    // Kotlin/Wasm (JS interop) target for browser
+    @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+    wasmJs {
+        browser {
+            commonWebpackConfig {
+                outputFileName = "bossterm-core.js"
+            }
+        }
+    }
 
     sourceSets {
         val commonMain by getting {
@@ -38,6 +45,11 @@ kotlin {
             dependencies {
                 implementation("junit:junit:4.13.2")
                 runtimeOnly("org.slf4j:slf4j-simple:2.0.9")
+            }
+        }
+        val wasmJsMain by getting {
+            dependencies {
+                // Kotlin/Wasm stdlib is automatically included
             }
         }
     }
