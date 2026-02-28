@@ -5,7 +5,6 @@ import kotlin.math.max
 class Color {
     val rGB: Int
 
-    @JvmOverloads
     constructor(r: Int, g: Int, b: Int, a: Int = 255) {
         this.rGB = ((a and 0xFF) shl 24) or ((r and 0xFF) shl 16) or ((g and 0xFF) shl 8) or (b and 0xFF)
     }
@@ -41,9 +40,9 @@ class Color {
 
     private fun toHexString16(): String {
         // (n * 0x101) converts the 8-bit number to 16 bits.
-        val red = padStart(Integer.toHexString(this.red * 0x101), 4, '0')
-        val green = padStart(Integer.toHexString(this.green * 0x101), 4, '0')
-        val blue = padStart(Integer.toHexString(this.blue * 0x101), 4, '0')
+        val red = padStart((this.red * 0x101).toString(16), 4, '0')
+        val green = padStart((this.green * 0x101).toString(16), 4, '0')
+        val blue = padStart((this.blue * 0x101).toString(16), 4, '0')
 
         return red + "/" + green + "/" + blue
     }
@@ -61,6 +60,6 @@ class Color {
     }
 
     override fun toString(): String {
-        return javaClass.getName() + "[r=" + this.red + ",g=" + this.green + ",b=" + this.blue + ", alpha=" + this.alpha + "]"
+        return "Color[r=${this.red},g=${this.green},b=${this.blue}, alpha=${this.alpha}]"
     }
 }

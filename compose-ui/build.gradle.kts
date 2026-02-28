@@ -42,7 +42,7 @@ kotlin {
 
     // Note: Android target removed from compose-ui - no androidMain source set exists
     // The core library (bossterm-core-mpp) supports Android
-    // compose-ui is Desktop-only for now
+    // compose-ui is Desktop + Web (wasmJs)
 
     // Desktop JVM target
     jvm("desktop") {
@@ -55,8 +55,15 @@ kotlin {
         }
     }
 
-    // Note: JS and Wasm targets removed - no actual implementation exists yet
-    // Can be added when jsMain/wasmJsMain source sets are implemented
+    // Kotlin/Wasm target for browser
+    @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+    wasmJs {
+        browser {
+            commonWebpackConfig {
+                outputFileName = "bossterm-compose.js"
+            }
+        }
+    }
 
     sourceSets {
         // Common source sets
@@ -111,6 +118,13 @@ kotlin {
         }
 
         val desktopTest by getting
+
+        // Web (Wasm) source set
+        val wasmJsMain by getting {
+            dependencies {
+                implementation(project(":bossterm-core-mpp"))
+            }
+        }
     }
 }
 
